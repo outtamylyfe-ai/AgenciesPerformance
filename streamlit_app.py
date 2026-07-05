@@ -54,11 +54,12 @@ if uploaded_file is not None:
         else:
             return "Others"
 
-    # 4. Product Consolidation Logic
+    # 4. Corrected Product Consolidation Logic matching new guidelines
     def map_product(prod):
         p = str(prod).strip().upper() if pd.notna(prod) else "UNKNOWN"
         if p in ['P', 'F']: return 'FSP'
-        elif p in ['UN', 'URN']: return 'Urn'
+        elif p == 'UN': return 'Urn'
+        elif p in ['URN', 'LOT']: return 'Lot'
         elif p == 'B': return 'Buddha'
         elif p == 'TABLET': return 'Tablet'
         else: return p.title()
@@ -75,10 +76,11 @@ if uploaded_file is not None:
             aggfunc='sum', 
             fill_value=0
         )
-        for c in ['FSP', 'Buddha', 'Tablet', 'Urn']:
+        # Synchronized for all core products including Lot
+        for c in ['FSP', 'Buddha', 'Tablet', 'Urn', 'Lot']:
             if c not in pivot.columns:
                 pivot[c] = 0.0
-        product_cols = ['FSP', 'Buddha', 'Tablet', 'Urn']
+        product_cols = ['FSP', 'Buddha', 'Tablet', 'Urn', 'Lot']
         other_cols = [c for c in pivot.columns if c not in product_cols]
         pivot = pivot[product_cols + other_cols]
         pivot['Total Sales'] = pivot.sum(axis=1)
@@ -111,8 +113,6 @@ if uploaded_file is not None:
     # --- 6-PAGE PDF GENERATION ENGINE WITH COLORED VISUALIZATIONS ---
     def generate_consolidated_pdf(base_df):
         pdf = FPDF()
-        
-        # Consistent color sequence to force brightness inside headless engines
         color_palette = px.colors.qualitative.Safe
         
         def add_matrix_page(title_text, branch_filter):
@@ -128,29 +128,31 @@ if uploaded_file is not None:
             matrix_df = get_agency_matrix(sub_df)
             
             # Table Headers
-            pdf.set_font("Helvetica", "B", 9)
-            pdf.cell(45, 8, "Agency Class", border=1)
-            pdf.cell(15, 8, "Branch", border=1)
-            pdf.cell(25, 8, "FSP", border=1)
-            pdf.cell(25, 8, "Buddha", border=1)
-            pdf.cell(25, 8, "Tablet", border=1)
-            pdf.cell(25, 8, "Urn", border=1)
-            pdf.cell(30, 8, "Total Sales", border=1, ln=True)
+            pdf.set_font("Helvetica", "B", 8)
+            pdf.cell(40, 8, "Agency Class", border=1)
+            pdf.cell(12, 8, "Branch", border=1)
+            pdf.cell(23, 8, "FSP", border=1)
+            pdf.cell(23, 8, "Buddha", border=1)
+            pdf.cell(23, 8, "Tablet", border=1)
+            pdf.cell(23, 8, "Urn", border=1)
+            pdf.cell(23, 8, "Lot", border=1)
+            pdf.cell(25, 8, "Total Sales", border=1, ln=True)
             
             # Table Body
-            pdf.set_font("Helvetica", "", 9)
+            pdf.set_font("Helvetica", "", 8)
             for _, r in matrix_df.iterrows():
                 if r['Agency_Class'] == 'GRAND TOTAL':
-                    pdf.set_font("Helvetica", "B", 9)
-                pdf.cell(45, 7, str(r['Agency_Class']), border=1)
-                pdf.cell(15, 7, str(r['BRANCH']), border=1)
-                pdf.cell(25, 7, f"${r['FSP']:,.2f}", border=1)
-                pdf.cell(25, 7, f"${r['Buddha']:,.2f}", border=1)
-                pdf.cell(25, 7, f"${r['Tablet']:,.2f}", border=1)
-                pdf.cell(25, 7, f"${r['Urn']:,.2f}", border=1)
-                pdf.cell(30, 7, f"${r['Total Sales']:,.2f}", border=1, ln=True)
+                    pdf.set_font("Helvetica", "B", 8)
+                pdf.cell(40, 7, str(r['Agency_Class']), border=1)
+                pdf.cell(12, 7, str(r['BRANCH']), border=1)
+                pdf.cell(23, 7, f"${r['FSP']:,.2f}", border=1)
+                pdf.cell(23, 7, f"${r['Buddha']:,.2f}", border=1)
+                pdf.cell(23, 7, f"${r['Tablet']:,.2f}", border=1)
+                pdf.cell(23, 7, f"${r['Urn']:,.2f}", border=1)
+                pdf.cell(23, 7, f"${r['Lot']:,.2f}", border=1)
+                pdf.cell(25, 7, f"${r['Total Sales']:,.2f}", border=1, ln=True)
             
-            # Generate Bar Chart with forced theme template and clear colors
+            # Generate Bar Chart with forced clear colors
             chart_df = sub_df.groupby(['Agency_Class', 'Product_Class'])[target_value_col].sum().reset_index()
             fig = px.bar(
                 chart_df, x="Agency_Class", y=target_value_col, color="Product_Class", 
@@ -190,7 +192,7 @@ if uploaded_file is not None:
                 pdf.cell(90, 8, str(p_type), border=1)
                 pdf.cell(60, 8, f"${r['Total Sales']:,.2f}", border=1, ln=True)
 
-            # Generate Donut Chart with forced theme template and clear colors
+            # Generate Donut Chart with forced clear colors
             product_summary_chart = sub_df.groupby('Product_Class')[target_value_col].sum().reset_index()
             product_summary_chart.columns = ['Product Type', 'Total Sales']
             fig = px.pie(
@@ -207,7 +209,7 @@ if uploaded_file is not None:
                 
             pdf.set_font("Helvetica", "", 11)
 
-        # Sequence matching specifications:
+        # Multi-page sequential mapping
         add_matrix_page("Page 1: Agency Performance Matrix (CCK Branch)", "CCK")
         add_summary_page("Page 2: Product Performance Summary (CCK Branch)", "CCK")
         add_matrix_page("Page 3: Agency Performance Matrix (LST Branch)", "LST")
@@ -262,7 +264,7 @@ if uploaded_file is not None:
                 for col in pivot_display.columns:
                     if col == 'FSP':
                         multi_columns.append(('FSP', ''))
-                    elif col in ['Buddha', 'Tablet', 'Urn']:
+                    elif col in ['Buddha', 'Tablet', 'Urn', 'Lot']:
                         multi_columns.append(('Non - FSP', col))
                     elif col == 'Total Sales':
                         multi_columns.append(('Total Sales', '')) 
