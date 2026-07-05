@@ -108,9 +108,12 @@ if uploaded_file is not None:
         summary_rows.append({'Product Type': 'Grand Total', 'Total Sales': grand_total_val})
         return pd.DataFrame(summary_rows).set_index('Product Type')
 
-    # --- 6-PAGE PDF GENERATION ENGINE WITH EMBEDDED VISUALIZATIONS ---
+    # --- 6-PAGE PDF GENERATION ENGINE WITH COLORED VISUALIZATIONS ---
     def generate_consolidated_pdf(base_df):
         pdf = FPDF()
+        
+        # Consistent color sequence to force brightness inside headless engines
+        color_palette = px.colors.qualitative.Safe
         
         def add_matrix_page(title_text, branch_filter):
             pdf.add_page()
@@ -147,10 +150,13 @@ if uploaded_file is not None:
                 pdf.cell(25, 7, f"${r['Urn']:,.2f}", border=1)
                 pdf.cell(30, 7, f"${r['Total Sales']:,.2f}", border=1, ln=True)
             
-            # Embed Bar mix chart into PDF
+            # Generate Bar Chart with forced theme template and clear colors
             chart_df = sub_df.groupby(['Agency_Class', 'Product_Class'])[target_value_col].sum().reset_index()
-            fig = px.bar(chart_df, x="Agency_Class", y=target_value_col, color="Product_Class", barmode="stack")
-            fig.update_layout(width=700, height=300, margin=dict(t=10, b=10, l=10, r=10))
+            fig = px.bar(
+                chart_df, x="Agency_Class", y=target_value_col, color="Product_Class", 
+                barmode="stack", template="plotly_white", color_discrete_sequence=color_palette
+            )
+            fig.update_layout(width=700, height=300, margin=dict(t=15, b=15, l=15, r=15))
             
             with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmpfile:
                 pio.write_image(fig, tmpfile.name, format="png")
@@ -184,11 +190,14 @@ if uploaded_file is not None:
                 pdf.cell(90, 8, str(p_type), border=1)
                 pdf.cell(60, 8, f"${r['Total Sales']:,.2f}", border=1, ln=True)
 
-            # Embed Donut Chart into PDF
+            # Generate Donut Chart with forced theme template and clear colors
             product_summary_chart = sub_df.groupby('Product_Class')[target_value_col].sum().reset_index()
             product_summary_chart.columns = ['Product Type', 'Total Sales']
-            fig = px.pie(product_summary_chart, values='Total Sales', names='Product Type', hole=0.4)
-            fig.update_layout(width=500, height=300, margin=dict(t=10, b=10, l=10, r=10))
+            fig = px.pie(
+                product_summary_chart, values='Total Sales', names='Product Type', 
+                hole=0.4, template="plotly_white", color_discrete_sequence=color_palette
+            )
+            fig.update_layout(width=500, height=300, margin=dict(t=15, b=15, l=15, r=15))
             
             with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmpfile:
                 pio.write_image(fig, tmpfile.name, format="png")
@@ -196,7 +205,9 @@ if uploaded_file is not None:
                 pdf.image(tmpfile.name, x=45, w=120)
             os.unlink(tmpfile.name)
                 
-        # Sequence logic strictly matching specifications:
+            pdf.set_font("Helvetica", "", 11)
+
+        # Sequence matching specifications:
         add_matrix_page("Page 1: Agency Performance Matrix (CCK Branch)", "CCK")
         add_summary_page("Page 2: Product Performance Summary (CCK Branch)", "CCK")
         add_matrix_page("Page 3: Agency Performance Matrix (LST Branch)", "LST")
