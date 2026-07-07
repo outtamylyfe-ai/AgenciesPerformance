@@ -7,22 +7,38 @@ import tempfile
 import os
 
 # Configure dashboard workspace layout
-st.set_page_config(page_title="Sales Report Dashboard", layout="wide")
-st.title("📊 June 2026 Closed Sales Report Dashboard")
+st.set_page_config(page_title="Multi-Month Sales Report Dashboard", layout="wide")
+st.title("📊 Multi-Month Closed Sales Report Dashboard")
 
-# --- 1. DYNAMIC FILE UPLOADER ENGINE ---
-uploaded_file = st.file_uploader("📂 Upload Closed Sales Report Excel Sheet", type=["xlsx"])
+# --- 1. DYNAMIC MULTI-FILE UPLOADER ENGINE ---
+uploaded_files = st.file_uploader(
+    "📂 Upload Closed Sales Report Excel Sheets (Select single or multiple months)", 
+    type=["xlsx"], 
+    accept_multiple_files=True
+)
 
-if uploaded_file is not None:
-    # Load the data dynamically from memory, starting headers at row index 4 (5th row)
-    df = pd.read_excel(uploaded_file, sheet_name=0, header=4)
-
-    # Clean column names by converting to string and stripping whitespace
-    df.columns = [str(c).strip() for c in df.columns]
+if uploaded_files:
+    all_months_data = []
+    
+    # Process each uploaded file
+    for uploaded_file in uploaded_files:
+        # Read the sheet, starting headers at row index 4 (5th row)
+        df_month = pd.read_excel(uploaded_file, sheet_name=0, header=4)
+        df_month.columns = [str(c).strip() for c in df_month.columns]
+        
+        # Deduce Month name from file name (e.g., "Jan closed sales.xlsx" -> "Jan")
+        file_name = uploaded_file.name
+        detected_month = file_name.split()[0].title() if " " in file_name else file_name.split(".")[0].title()
+        df_month['Report_Month'] = detected_month
+        
+        all_months_data.append(df_month)
+        
+    # Combine all uploaded data into a single master frame
+    df_master = pd.concat(all_months_data, ignore_index=True)
 
     # 🎯 Dynamically find the correct column header for Sales
     target_value_col = None
-    for col in df.columns:
+    for col in df_master.columns:
         if 'net' in col.lower() and 'main' in col.lower():
             target_value_col = col
             break
@@ -31,7 +47,7 @@ if uploaded_file is not None:
         target_value_col = 'Net main product'
 
     # 2. Prioritize CONFIRM sales and ignore BOOK status rows
-    df_confirm = df[df['STATUS'] == 'CONFIRM'].copy()
+    df_confirm = df_master[df_master['STATUS'] == 'CONFIRM'].copy()
 
     # 3. Official Agency Mapping reflecting individual breakdown requirements
     def classify_agency_official(row):
@@ -54,7 +70,7 @@ if uploaded_file is not None:
         else:
             return "Others"
 
-    # 4. Corrected Product Consolidation Logic matching new guidelines
+    # 4. Product Consolidation Logic
     def map_product(prod):
         p = str(prod).strip().upper() if pd.notna(prod) else "UNKNOWN"
         if p in ['P', 'F']: return 'FSP'
@@ -69,6 +85,8 @@ if uploaded_file is not None:
 
     # --- HELPER FUNCTIONS FOR CALCULATIONS ---
     def get_agency_matrix(data_frame):
+        if data_frame.empty:
+            return pd.DataFrame()
         pivot = data_frame.pivot_table(
             index=['Agency_Class', 'BRANCH'], 
             columns='Product_Class', 
@@ -76,7 +94,6 @@ if uploaded_file is not None:
             aggfunc='sum', 
             fill_value=0
         )
-        # Synchronized for all core products including Lot
         for c in ['FSP', 'Buddha', 'Tablet', 'Urn', 'Lot']:
             if c not in pivot.columns:
                 pivot[c] = 0.0
@@ -95,6 +112,8 @@ if uploaded_file is not None:
         return pivot_display
 
     def get_product_summary(data_frame):
+        if data_frame.empty:
+            return pd.DataFrame()
         product_summary = data_frame.groupby('Product_Class')[target_value_col].sum().reset_index()
         product_summary.columns = ['Product Type', 'Total Sales']
         
@@ -110,124 +129,134 @@ if uploaded_file is not None:
         summary_rows.append({'Product Type': 'Grand Total', 'Total Sales': grand_total_val})
         return pd.DataFrame(summary_rows).set_index('Product Type')
 
-    # --- 6-PAGE PDF GENERATION ENGINE WITH COLORED VISUALIZATIONS ---
-    def generate_consolidated_pdf(base_df):
+    # --- Option C: DYNAMIC MULTI-MONTH PDF GENERATION ENGINE ---
+    def generate_consolidated_pdf(base_df, selected_months):
         pdf = FPDF()
         color_palette = px.colors.qualitative.Safe
         
-        def add_matrix_page(title_text, branch_filter):
-            pdf.add_page()
-            pdf.set_font("Helvetica", "B", 14)
-            pdf.cell(0, 10, title_text, ln=True, align="C")
-            pdf.ln(3)
-            
-            sub_df = base_df.copy()
-            if branch_filter != 'ALL':
-                sub_df = sub_df[sub_df['BRANCH'] == branch_filter]
+        for current_month in selected_months:
+            month_df = base_df[base_df['Report_Month'] == current_month]
+            if month_df.empty:
+                continue
                 
-            matrix_df = get_agency_matrix(sub_df)
-            
-            # Table Headers
-            pdf.set_font("Helvetica", "B", 8)
-            pdf.cell(40, 8, "Agency Class", border=1)
-            pdf.cell(12, 8, "Branch", border=1)
-            pdf.cell(23, 8, "FSP", border=1)
-            pdf.cell(23, 8, "Buddha", border=1)
-            pdf.cell(23, 8, "Tablet", border=1)
-            pdf.cell(23, 8, "Urn", border=1)
-            pdf.cell(23, 8, "Lot", border=1)
-            pdf.cell(25, 8, "Total Sales", border=1, ln=True)
-            
-            # Table Body
-            pdf.set_font("Helvetica", "", 8)
-            for _, r in matrix_df.iterrows():
-                if r['Agency_Class'] == 'GRAND TOTAL':
-                    pdf.set_font("Helvetica", "B", 8)
-                pdf.cell(40, 7, str(r['Agency_Class']), border=1)
-                pdf.cell(12, 7, str(r['BRANCH']), border=1)
-                pdf.cell(23, 7, f"${r['FSP']:,.2f}", border=1)
-                pdf.cell(23, 7, f"${r['Buddha']:,.2f}", border=1)
-                pdf.cell(23, 7, f"${r['Tablet']:,.2f}", border=1)
-                pdf.cell(23, 7, f"${r['Urn']:,.2f}", border=1)
-                pdf.cell(23, 7, f"${r['Lot']:,.2f}", border=1)
-                pdf.cell(25, 7, f"${r['Total Sales']:,.2f}", border=1, ln=True)
-            
-            # Generate Bar Chart with forced clear colors
-            chart_df = sub_df.groupby(['Agency_Class', 'Product_Class'])[target_value_col].sum().reset_index()
-            fig = px.bar(
-                chart_df, x="Agency_Class", y=target_value_col, color="Product_Class", 
-                barmode="stack", template="plotly_white", color_discrete_sequence=color_palette
-            )
-            fig.update_layout(width=700, height=300, margin=dict(t=15, b=15, l=15, r=15))
-            
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmpfile:
-                pio.write_image(fig, tmpfile.name, format="png")
+            def add_matrix_page(title_text, branch_filter):
+                pdf.add_page()
+                pdf.set_font("Helvetica", "B", 14)
+                pdf.cell(0, 10, f"{current_month.upper()} - {title_text}", ln=True, align="C")
+                pdf.ln(3)
+                
+                sub_df = month_df.copy()
+                if branch_filter != 'ALL':
+                    sub_df = sub_df[sub_df['BRANCH'] == branch_filter]
+                    
+                matrix_df = get_agency_matrix(sub_df)
+                if matrix_df.empty: return
+                
+                # Table Headers
+                pdf.set_font("Helvetica", "B", 8)
+                pdf.cell(40, 8, "Agency Class", border=1)
+                pdf.cell(12, 8, "Branch", border=1)
+                pdf.cell(23, 8, "FSP", border=1)
+                pdf.cell(23, 8, "Buddha", border=1)
+                pdf.cell(23, 8, "Tablet", border=1)
+                pdf.cell(23, 8, "Urn", border=1)
+                pdf.cell(23, 8, "Lot", border=1)
+                pdf.cell(25, 8, "Total Sales", border=1, ln=True)
+                
+                # Table Body
+                pdf.set_font("Helvetica", "", 8)
+                for _, r in matrix_df.iterrows():
+                    if r['Agency_Class'] == 'GRAND TOTAL':
+                        pdf.set_font("Helvetica", "B", 8)
+                    pdf.cell(40, 7, str(r['Agency_Class']), border=1)
+                    pdf.cell(12, 7, str(r['BRANCH']), border=1)
+                    pdf.cell(23, 7, f"${r['FSP']:,.2f}", border=1)
+                    pdf.cell(23, 7, f"${r['Buddha']:,.2f}", border=1)
+                    pdf.cell(23, 7, f"${r['Tablet']:,.2f}", border=1)
+                    pdf.cell(23, 7, f"${r['Urn']:,.2f}", border=1)
+                    pdf.cell(23, 7, f"${r['Lot']:,.2f}", border=1)
+                    pdf.cell(25, 7, f"${r['Total Sales']:,.2f}", border=1, ln=True)
+                
+                # Generate Bar Chart image bytes
+                chart_df = sub_df.groupby(['Agency_Class', 'Product_Class'])[target_value_col].sum().reset_index()
+                fig = px.bar(
+                    chart_df, x="Agency_Class", y=target_value_col, color="Product_Class", 
+                    barmode="stack", template="plotly_white", color_discrete_sequence=color_palette
+                )
+                fig.update_layout(width=700, height=300, margin=dict(t=15, b=15, l=15, r=15))
+                
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmpfile:
+                    pio.write_image(fig, tmpfile.name, format="png")
+                    pdf.ln(5)
+                    pdf.image(tmpfile.name, x=10, w=190)
+                os.unlink(tmpfile.name)
+                    
+            def add_summary_page(title_text, branch_filter):
+                pdf.add_page()
+                pdf.set_font("Helvetica", "B", 14)
+                pdf.cell(0, 10, f"{current_month.upper()} - {title_text}", ln=True, align="C")
                 pdf.ln(5)
-                pdf.image(tmpfile.name, x=10, w=190)
-            os.unlink(tmpfile.name)
                 
-        def add_summary_page(title_text, branch_filter):
-            pdf.add_page()
-            pdf.set_font("Helvetica", "B", 14)
-            pdf.cell(0, 10, title_text, ln=True, align="C")
-            pdf.ln(5)
-            
-            sub_df = base_df.copy()
-            if branch_filter != 'ALL':
-                sub_df = sub_df[sub_df['BRANCH'] == branch_filter]
+                sub_df = month_df.copy()
+                if branch_filter != 'ALL':
+                    sub_df = sub_df[sub_df['BRANCH'] == branch_filter]
+                    
+                summary_df = get_product_summary(sub_df).reset_index()
+                if summary_df.empty: return
                 
-            summary_df = get_product_summary(sub_df).reset_index()
-            
-            # Table Headers
-            pdf.set_font("Helvetica", "B", 11)
-            pdf.cell(90, 8, "Product Type", border=1)
-            pdf.cell(60, 8, "Total Sales", border=1, ln=True)
-            
-            # Table Body
-            pdf.set_font("Helvetica", "", 11)
-            for _, r in summary_df.iterrows():
-                p_type = r['Product Type']
-                if p_type in ['Non-FSP Total', 'Grand Total']:
-                    pdf.set_font("Helvetica", "B", 11)
-                pdf.cell(90, 8, str(p_type), border=1)
-                pdf.cell(60, 8, f"${r['Total Sales']:,.2f}", border=1, ln=True)
+                # Table Headers
+                pdf.set_font("Helvetica", "B", 11)
+                pdf.cell(90, 8, "Product Type", border=1)
+                pdf.cell(60, 8, "Total Sales", border=1, ln=True)
+                
+                # Table Body
+                pdf.set_font("Helvetica", "", 11)
+                for _, r in summary_df.iterrows():
+                    p_type = r['Product Type']
+                    if p_type in ['Non-FSP Total', 'Grand Total']:
+                        pdf.set_font("Helvetica", "B", 11)
+                    pdf.cell(90, 8, str(p_type), border=1)
+                    pdf.cell(60, 8, f"${r['Total Sales']:,.2f}", border=1, ln=True)
 
-            # Generate Donut Chart with forced clear colors
-            product_summary_chart = sub_df.groupby('Product_Class')[target_value_col].sum().reset_index()
-            product_summary_chart.columns = ['Product Type', 'Total Sales']
-            fig = px.pie(
-                product_summary_chart, values='Total Sales', names='Product Type', 
-                hole=0.4, template="plotly_white", color_discrete_sequence=color_palette
-            )
-            fig.update_layout(width=500, height=300, margin=dict(t=15, b=15, l=15, r=15))
-            
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmpfile:
-                pio.write_image(fig, tmpfile.name, format="png")
-                pdf.ln(5)
-                pdf.image(tmpfile.name, x=45, w=120)
-            os.unlink(tmpfile.name)
+                # Generate Donut Chart image bytes
+                product_summary_chart = sub_df.groupby('Product_Class')[target_value_col].sum().reset_index()
+                product_summary_chart.columns = ['Product Type', 'Total Sales']
+                fig = px.pie(
+                    product_summary_chart, values='Total Sales', names='Product Type', 
+                    hole=0.4, template="plotly_white", color_discrete_sequence=color_palette
+                )
+                fig.update_layout(width=500, height=300, margin=dict(t=15, b=15, l=15, r=15))
                 
-            pdf.set_font("Helvetica", "", 11)
-
-        # Multi-page sequential mapping
-        add_matrix_page("Page 1: Agency Performance Matrix (CCK Branch)", "CCK")
-        add_summary_page("Page 2: Product Performance Summary (CCK Branch)", "CCK")
-        add_matrix_page("Page 3: Agency Performance Matrix (LST Branch)", "LST")
-        add_summary_page("Page 4: Product Performance Summary (LST Branch)", "LST")
-        add_matrix_page("Page 5: Agency Performance Matrix (Both Branches)", "ALL")
-        add_summary_page("Page 6: Product Performance Summary (Both Branches)", "ALL")
-        
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmpfile:
+                    pio.write_image(fig, tmpfile.name, format="png")
+                    pdf.ln(5)
+                    pdf.image(tmpfile.name, x=45, w=120)
+                os.unlink(tmpfile.name)
+            
+            # Append 6 structural pages per month uploaded
+            add_matrix_page("Agency Performance Matrix (CCK Branch)", "CCK")
+            add_summary_page("Product Performance Summary (CCK Branch)", "CCK")
+            add_matrix_page("Agency Performance Matrix (LST Branch)", "LST")
+            add_summary_page("Product Performance Summary (LST Branch)", "LST")
+            add_matrix_page("Agency Performance Matrix (Both Branches)", "ALL")
+            add_summary_page("Product Performance Summary (Both Branches)", "ALL")
+            
         return pdf.output()
 
-    # --- NAVIGATION TOGGLE TOOLS (SIDEBAR) ---
-    st.sidebar.header("Navigation Controls")
+    # --- Option A: NAVIGATION TOGGLE TOOLS (SIDEBAR MONTH FILTERS) ---
+    st.sidebar.header("Global Filters")
+    
+    available_months = sorted(list(df_confirm['Report_Month'].unique()))
+    month_toggle = st.sidebar.multiselect("📅 Select Month(s) to View:", options=available_months, default=available_months)
+    
     branch_toggle = st.sidebar.selectbox("📍 Select Branch View:", options=['ALL', 'CCK', 'LST'])
 
     available_agencies = ["Fu Gui Services", "APG Advisory", "Zenbox", "Singapore Lifestyle Associates", "JF Life", "Direct BDD", "Others"]
     agency_toggle = st.sidebar.multiselect("🏢 Select Agencies:", options=available_agencies, default=available_agencies)
 
-    # Apply filters based on live toggle inputs
+    # Apply global cross filters based on interactive toggle choices
     filtered_df = df_confirm.copy()
+    filtered_df = filtered_df[filtered_df['Report_Month'].isin(month_toggle)]
     if branch_toggle != 'ALL':
         filtered_df = filtered_df[filtered_df['BRANCH'] == branch_toggle]
     filtered_df = filtered_df[filtered_df['Agency_Class'].isin(agency_toggle)]
@@ -237,78 +266,89 @@ if uploaded_file is not None:
         if target_value_col in filtered_df.columns:
             total_sales = filtered_df[target_value_col].sum()
             
-            # Top KPI Card & Consolidated PDF Action Button
+            # Dynamic Overview Row
             top_col1, top_col2 = st.columns([3, 1])
             with top_col1:
-                st.metric(label=f"Total Sales ({branch_toggle} View)", value=f"${total_sales:,.2f}")
+                st.metric(label=f"Total Aggregated Sales ({branch_toggle} View)", value=f"${total_sales:,.2f}")
             with top_col2:
                 st.write(" ")
-                with st.spinner("Compiling Visual Consolidated Report PDF..."):
-                    consolidated_pdf_bytes = generate_consolidated_pdf(df_confirm)
+                with st.spinner("Compiling Visual Multi-Month PDF..."):
+                    consolidated_pdf_bytes = generate_consolidated_pdf(df_confirm, month_toggle)
                 st.download_button(
-                    label="📥 Download Consolidated 6-Page PDF",
+                    label="📥 Download Consolidated Multi-Month PDF",
                     data=bytes(consolidated_pdf_bytes),
-                    file_name="Consolidated_Sales_Report.pdf",
+                    file_name="Consolidated_Multi_Month_Report.pdf",
                     mime="application/pdf"
                 )
                 
-            # Tab Interface layout workspace
-            tab1, tab2 = st.tabs(["🏢 Agency Performance", "📦 Product Performance Summary"])
+            # Workspace Presentation Layer Tabs
+            tab1, tab2 = st.tabs(["🏢 Agency Performance Workspace", "📦 Product Performance Summary"])
             
             with tab1:
                 st.subheader("📋 Agency Performance Breakdown by Product Type")
                 pivot_display = get_agency_matrix(filtered_df)
-                pivot_display = pivot_display.set_index(['Agency_Class', 'BRANCH'])
                 
-                multi_columns = []
-                for col in pivot_display.columns:
-                    if col == 'FSP':
-                        multi_columns.append(('FSP', ''))
-                    elif col in ['Buddha', 'Tablet', 'Urn', 'Lot']:
-                        multi_columns.append(('Non - FSP', col))
-                    elif col == 'Total Sales':
-                        multi_columns.append(('Total Sales', '')) 
-                    else:
-                        multi_columns.append(('Other', col))
+                if not pivot_display.empty:
+                    pivot_display = pivot_display.set_index(['Agency_Class', 'BRANCH'])
+                    
+                    multi_columns = []
+                    for col in pivot_display.columns:
+                        if col == 'FSP':
+                            multi_columns.append(('FSP', ''))
+                        elif col in ['Buddha', 'Tablet', 'Urn', 'Lot']:
+                            multi_columns.append(('Non - FSP', col))
+                        elif col == 'Total Sales':
+                            multi_columns.append(('Total Sales', '')) 
+                        else:
+                            multi_columns.append(('Other', col))
+                            
+                    pivot_display.columns = pd.MultiIndex.from_tuples(multi_columns)
+                    
+                    col1, col2 = st.columns([4, 3])
+                    with col1:
+                        st.dataframe(pivot_display.style.format("${:,.2f}"), width="stretch")
+                    with col2:
+                        # --- Option B: MONTH-ON-MONTH REVENUE MIX VISUALIZATION ---
+                        chart_df = filtered_df.groupby(['Report_Month', 'Agency_Class', 'Product_Class'])[target_value_col].sum().reset_index()
                         
-                pivot_display.columns = pd.MultiIndex.from_tuples(multi_columns)
-                
-                col1, col2 = st.columns([3, 2])
-                with col1:
-                    st.dataframe(pivot_display.style.format("${:,.2f}"), width="stretch")
-                with col2:
-                    chart_df = filtered_df.groupby(['Agency_Class', 'Product_Class'])[target_value_col].sum().reset_index()
-                    fig_bar = px.bar(
-                        chart_df, x="Agency_Class", y=target_value_col, color="Product_Class",
-                        title="Agency Revenue Mix", labels={target_value_col: "Sales ($)", "Agency_Class": "Agency"},
-                        barmode="stack"
-                    )
-                    fig_bar.update_layout(height=320, margin=dict(t=30, b=10, l=10, r=10))
-                    st.plotly_chart(fig_bar, width="stretch")
+                        # If multiple months are actively selected, change axis to trace progression
+                        x_axis_var = "Agency_Class" if len(month_toggle) <= 1 else "Report_Month"
+                        facet_var = None if len(month_toggle) <= 1 else "Agency_Class"
+                        
+                        fig_bar = px.bar(
+                            chart_df, x=x_axis_var, y=target_value_col, color="Product_Class",
+                            facet_col=facet_var, facet_col_wrap=2,
+                            title="Month-on-Month Revenue Mix", 
+                            labels={target_value_col: "Sales ($)", "Agency_Class": "Agency", "Report_Month": "Month"},
+                            barmode="stack", template="plotly_white"
+                        )
+                        fig_bar.update_layout(height=380, margin=dict(t=30, b=10, l=10, r=10))
+                        st.plotly_chart(fig_bar, width="stretch")
                     
             with tab2:
                 st.subheader("📦 Total Performance by Product Type Only")
                 final_summary_df = get_product_summary(filtered_df)
                 
-                col3, col4 = st.columns([3, 2])
-                with col3:
-                    st.dataframe(
-                        final_summary_df.style.format("${:,.2f}")
-                        .set_properties(**{'font-weight': 'bold'}, subset=pd.IndexSlice[['Non-FSP Total', 'Grand Total'], :]),
-                        width="stretch"
-                    )
-                with col4:
-                    product_summary_chart = filtered_df.groupby('Product_Class')[target_value_col].sum().reset_index()
-                    product_summary_chart.columns = ['Product Type', 'Total Sales']
-                    fig_donut = px.pie(
-                        product_summary_chart, values='Total Sales', names='Product Type', 
-                        hole=0.4, title="Product Category Share"
-                    )
-                    fig_donut.update_layout(height=300, margin=dict(t=30, b=10, l=10, r=10))
-                    st.plotly_chart(fig_donut, width="stretch")
+                if not final_summary_df.empty:
+                    col3, col4 = st.columns([3, 2])
+                    with col3:
+                        st.dataframe(
+                            final_summary_df.style.format("${:,.2f}")
+                            .set_properties(**{'font-weight': 'bold'}, subset=pd.IndexSlice[['Non-FSP Total', 'Grand Total'], :]),
+                            width="stretch"
+                        )
+                    with col4:
+                        product_summary_chart = filtered_df.groupby('Product_Class')[target_value_col].sum().reset_index()
+                        product_summary_chart.columns = ['Product Type', 'Total Sales']
+                        fig_donut = px.pie(
+                            product_summary_chart, values='Total Sales', names='Product Type', 
+                            hole=0.4, title="Product Category Share", template="plotly_white"
+                        )
+                        fig_donut.update_layout(height=300, margin=dict(t=30, b=10, l=10, r=10))
+                        st.plotly_chart(fig_donut, width="stretch")
         else:
             st.error(f"⚠️ Target sales values column header not identified in the uploaded schema.")
     else:
-        st.warning("No records found matching the current navigation toggle filters.")
+        st.warning("No records found matching your selected monthly or agency filter constraints.")
 else:
-    st.info("💡 Welcome! Please upload your reference 'Closed Sales Report' Excel sheet above to automatically populate the dashboard performance views.")
+    st.info("💡 Welcome! Please upload one or multiple monthly 'Closed Sales Report' Excel files above to begin.")
