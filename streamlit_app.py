@@ -46,8 +46,8 @@ if uploaded_files:
     if not target_value_col:
         target_value_col = 'Net main product'
 
-    # 2. Process all dataset rows including those previously filtered out
-    df_processed = df_master.copy()
+    # 2. 🎯 CRITICAL RE-INCLUSION: Only preserve rows with 'CONFIRM' status and exclude 'BOOK'
+    df_confirm = df_master[df_master['STATUS'] == 'CONFIRM'].copy()
 
     # 3. Official Agency Mapping reflecting individual breakdown requirements
     def classify_agency_official(row):
@@ -80,8 +80,8 @@ if uploaded_files:
         elif p == 'TABLET': return 'Tablet'
         else: return p.title()
 
-    df_processed['Agency_Class'] = df_processed.apply(classify_agency_official, axis=1)
-    df_processed['Product_Class'] = df_processed['PRODUCT_CODE'].apply(map_product)
+    df_confirm['Agency_Class'] = df_confirm.apply(classify_agency_official, axis=1)
+    df_confirm['Product_Class'] = df_confirm['PRODUCT_CODE'].apply(map_product)
 
     # --- HELPER FUNCTIONS FOR CALCULATIONS ---
     def get_agency_matrix(data_frame):
@@ -246,7 +246,7 @@ if uploaded_files:
     # --- GLOBAL WORKSPACE NAVIGATION CONTROL ---
     st.sidebar.header("Global Filters")
     
-    available_months = sorted(list(df_processed['Report_Month'].unique()))
+    available_months = sorted(list(df_confirm['Report_Month'].unique()))
     month_toggle = st.sidebar.multiselect("📅 Select Month(s) to View:", options=available_months, default=available_months)
     
     branch_toggle = st.sidebar.selectbox("📍 Select Branch View:", options=['ALL', 'CCK', 'LST'])
@@ -255,7 +255,7 @@ if uploaded_files:
     agency_toggle = st.sidebar.multiselect("🏢 Select Agencies:", options=available_agencies, default=available_agencies)
 
     # Apply interactive cross filters based on selection maps
-    filtered_df = df_processed.copy()
+    filtered_df = df_confirm.copy()
     filtered_df = filtered_df[filtered_df['Report_Month'].isin(month_toggle)]
     if branch_toggle != 'ALL':
         filtered_df = filtered_df[filtered_df['BRANCH'] == branch_toggle]
@@ -273,11 +273,11 @@ if uploaded_files:
             with top_col2:
                 st.write(" ")
                 with st.spinner("Compiling Comprehensive PDF..."):
-                    consolidated_pdf_bytes = generate_consolidated_pdf(df_processed, month_toggle)
+                    consolidated_pdf_bytes = generate_consolidated_pdf(df_confirm, month_toggle)
                 st.download_button(
                     label="📥 Download Consolidated Multi-Month PDF",
                     data=bytes(consolidated_pdf_bytes),
-                    file_name="Consolidated_All_Records_Report.pdf",
+                    file_name="Consolidated_Confirm_Sales_Report.pdf",
                     mime="application/pdf"
                 )
                 
