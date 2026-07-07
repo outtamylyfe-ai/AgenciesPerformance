@@ -46,8 +46,8 @@ if uploaded_files:
     if not target_value_col:
         target_value_col = 'Net main product'
 
-    # 2. Prioritize CONFIRM sales and ignore BOOK status rows
-    df_confirm = df_master[df_master['STATUS'] == 'CONFIRM'].copy()
+    # 2. Process all dataset rows including those previously filtered out
+    df_processed = df_master.copy()
 
     # 3. Official Agency Mapping reflecting individual breakdown requirements
     def classify_agency_official(row):
@@ -80,8 +80,8 @@ if uploaded_files:
         elif p == 'TABLET': return 'Tablet'
         else: return p.title()
 
-    df_confirm['Agency_Class'] = df_confirm.apply(classify_agency_official, axis=1)
-    df_confirm['Product_Class'] = df_confirm['PRODUCT_CODE'].apply(map_product)
+    df_processed['Agency_Class'] = df_processed.apply(classify_agency_official, axis=1)
+    df_processed['Product_Class'] = df_processed['PRODUCT_CODE'].apply(map_product)
 
     # --- HELPER FUNCTIONS FOR CALCULATIONS ---
     def get_agency_matrix(data_frame):
@@ -129,7 +129,7 @@ if uploaded_files:
         summary_rows.append({'Product Type': 'Grand Total', 'Total Sales': grand_total_val})
         return pd.DataFrame(summary_rows).set_index('Product Type')
 
-    # --- Option C: DYNAMIC MULTI-MONTH PDF GENERATION ENGINE ---
+    # --- DYNAMIC MULTI-MONTH PDF GENERATION ENGINE ---
     def generate_consolidated_pdf(base_df, selected_months):
         pdf = FPDF()
         color_palette = px.colors.qualitative.Safe
@@ -233,7 +233,7 @@ if uploaded_files:
                     pdf.image(tmpfile.name, x=45, w=120)
                 os.unlink(tmpfile.name)
             
-            # Append 6 structural pages per month uploaded
+            # Append pages sequentially per month
             add_matrix_page("Agency Performance Matrix (CCK Branch)", "CCK")
             add_summary_page("Product Performance Summary (CCK Branch)", "CCK")
             add_matrix_page("Agency Performance Matrix (LST Branch)", "LST")
@@ -243,10 +243,10 @@ if uploaded_files:
             
         return pdf.output()
 
-    # --- Option A: NAVIGATION TOGGLE TOOLS (SIDEBAR MONTH FILTERS) ---
+    # --- GLOBAL WORKSPACE NAVIGATION CONTROL ---
     st.sidebar.header("Global Filters")
     
-    available_months = sorted(list(df_confirm['Report_Month'].unique()))
+    available_months = sorted(list(df_processed['Report_Month'].unique()))
     month_toggle = st.sidebar.multiselect("📅 Select Month(s) to View:", options=available_months, default=available_months)
     
     branch_toggle = st.sidebar.selectbox("📍 Select Branch View:", options=['ALL', 'CCK', 'LST'])
@@ -254,8 +254,8 @@ if uploaded_files:
     available_agencies = ["Fu Gui Services", "APG Advisory", "Zenbox", "Singapore Lifestyle Associates", "JF Life", "Direct BDD", "Others"]
     agency_toggle = st.sidebar.multiselect("🏢 Select Agencies:", options=available_agencies, default=available_agencies)
 
-    # Apply global cross filters based on interactive toggle choices
-    filtered_df = df_confirm.copy()
+    # Apply interactive cross filters based on selection maps
+    filtered_df = df_processed.copy()
     filtered_df = filtered_df[filtered_df['Report_Month'].isin(month_toggle)]
     if branch_toggle != 'ALL':
         filtered_df = filtered_df[filtered_df['BRANCH'] == branch_toggle]
@@ -266,18 +266,18 @@ if uploaded_files:
         if target_value_col in filtered_df.columns:
             total_sales = filtered_df[target_value_col].sum()
             
-            # Dynamic Overview Row
+            # Overview Performance Rows
             top_col1, top_col2 = st.columns([3, 1])
             with top_col1:
                 st.metric(label=f"Total Aggregated Sales ({branch_toggle} View)", value=f"${total_sales:,.2f}")
             with top_col2:
                 st.write(" ")
-                with st.spinner("Compiling Visual Multi-Month PDF..."):
-                    consolidated_pdf_bytes = generate_consolidated_pdf(df_confirm, month_toggle)
+                with st.spinner("Compiling Comprehensive PDF..."):
+                    consolidated_pdf_bytes = generate_consolidated_pdf(df_processed, month_toggle)
                 st.download_button(
                     label="📥 Download Consolidated Multi-Month PDF",
                     data=bytes(consolidated_pdf_bytes),
-                    file_name="Consolidated_Multi_Month_Report.pdf",
+                    file_name="Consolidated_All_Records_Report.pdf",
                     mime="application/pdf"
                 )
                 
@@ -308,10 +308,9 @@ if uploaded_files:
                     with col1:
                         st.dataframe(pivot_display.style.format("${:,.2f}"), width="stretch")
                     with col2:
-                        # --- Option B: MONTH-ON-MONTH REVENUE MIX VISUALIZATION ---
                         chart_df = filtered_df.groupby(['Report_Month', 'Agency_Class', 'Product_Class'])[target_value_col].sum().reset_index()
                         
-                        # If multiple months are actively selected, change axis to trace progression
+                        # Fluid Axis Configuration
                         x_axis_var = "Agency_Class" if len(month_toggle) <= 1 else "Report_Month"
                         facet_var = None if len(month_toggle) <= 1 else "Agency_Class"
                         
@@ -349,6 +348,6 @@ if uploaded_files:
         else:
             st.error(f"⚠️ Target sales values column header not identified in the uploaded schema.")
     else:
-        st.warning("No records found matching your selected monthly or agency filter constraints.")
+        st.warning("No records found matching your selected configuration criteria.")
 else:
-    st.info("💡 Welcome! Please upload one or multiple monthly 'Closed Sales Report' Excel files above to begin.")
+    st.info("💡 Welcome! Please upload your monthly 'Closed Sales Report' Excel files above to begin analysis.")
