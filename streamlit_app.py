@@ -1,388 +1,425 @@
-"""
-Branch Inventory Dashboard
-===========================
-Reads a monthly inventory workbook (e.g. "CCK-TABLET", "CCK-NICHE",
-"LST-TABLE & NICHE", "TLT-TABLE & NICHE") and produces a clean per-sheet
-breakdown of Total / Sold / Balance / Balance Value, correctly excluding
-sub-total, total, and repeated-header rows.
-
-Design notes (why it's built this way):
-- Sheets have MERGED cells for the identifier column (BLOCK/PRODUCT) and
-  sometimes NAME — continuation rows show up as blank/None in that column.
-  Forward-filling those columns is required, otherwise you either drop
-  legitimate data (undercount) or crash the aggregation.
-- Summary/sub-total/footer rows are removed by scanning EVERY cell in a row
-  for the literal words TOTAL / SUB / SUM. This is what actually filters
-  out rows like "BLK A NICHE SUB TOTAL:", "TABLET TOTAL:", "NICHE TOTAL:",
-  " ALL PRODUCT TOTAL:", AND the repeated header row that sometimes appears
-  mid-sheet (e.g. a stray "BLOCK | LAUNCH DATE | ... | TOTAL" row) — that
-  row also contains the word TOTAL, so it's caught by the same rule.
-- LOT TYPE classification uses an EXACT dictionary lookup (after
-  strip+upper), never substring/keyword matching. This is the fix for the
-  10,098 vs 10,070 bug: a keyword rule like `"SG" in lot_type` will also
-  match "TWIN SG" (a completely different lot type) since it contains "SG"
-  as a substring. Exact matching cannot make that mistake.
-- Sheets are handled generically by locating columns via their header TEXT
-  (not fixed positions), so the same code works whether the sheet has a
-  "BLOCK" or "PRODUCT" identifier column, and whether or not it has a
-  "LOT TYPE" column at all (pure tablet sheets don't).
-"""
-
-import io
-from collections import defaultdict
-
-import pandas as pd
 import streamlit as st
-from openpyxl import load_workbook
+import pandas as pd
+import numpy as np
+import re
 
-st.set_page_config(page_title="Branch Inventory Dashboard", layout="wide")
+# ------------------------------------------------------------
+# 1. Strict Filtering: drop summary/subtotal/footer rows
+# ------------------------------------------------------------
+def filter_summary_rows(df):
+    """Remove rows where the first column is null or contains TOTAL/SUB/SUM."""
+    if df.empty:
+        return df
+    first_col = df.columns[0]
+    # Drop rows where first column is missing
+    mask = df[first_col].notna()
+    # Drop rows where first column contains 'total', 'sub', 'sum' (case-insensitive)
+    mask = mask & ~df[first_col].astype(str).str.contains('total|sub|sum', case=False, na=False)
+    # Drop rows where first column is empty string
+    mask = mask & (df[first_col].astype(str).str.strip() != '')
+    return df[mask].copy()
 
-# =============================================================================
-# CONFIG
-# =============================================================================
-
-# Any row containing one of these words (in ANY cell) is treated as a
-# summary / sub-total / footer / repeated-header row and dropped.
-FOOTER_KEYWORDS = ["TOTAL", "SUB", "SUM"]
-
-# Strict, exact-match classification. Keys must be UPPERCASE + stripped.
-# Add new lot type codes here as the reporting team introduces them —
-# do NOT switch this to substring matching.
+# ------------------------------------------------------------
+# 2. Exact LOT TYPE mapping
+# ------------------------------------------------------------
 LOT_TYPE_MAP = {
-    "SINGLE": "Single",
-    "SG": "Single",
-    "DOUBLE": "Double",
-    "DB": "Double",
-    "FAMILY": "Family",
-    "TOWER": "Tower",
-    "BUDDHA": "Buddha",
-    "U-BUDDHA": "Buddha",
-    "TWIN DB": "Special",
-    "TWIN SG": "Special",
-    "M-TWS": "Special",
-    "M-TWD": "Special",
+    'SINGLE': 'Single',
+    'DOUBLE': 'Double',
+    'FAMILY': 'Family',
+    'TOWER': 'Tower',
+    'U-BUDDHA': 'Buddha',
+    'TWIN DB': 'Special',
+    'TWIN SG': 'Special',
+    'M-TWS': 'Special',
+    'M-TWD': 'Special',
+    # add any other types you encounter
 }
 
-CATEGORY_ORDER = [
-    "Niche - Single",
-    "Niche - Double",
-    "Niche - Family",
-    "Niche - Buddha",
-    "Niche - Tower",
-    "Niche - Special",
-    "Tablet",
-]
+def categorize_lot_type(lot_type):
+    if pd.isna(lot_type):
+        return 'Unknown'
+    lot_type = str(lot_type).strip().upper()
+    return LOT_TYPE_MAP.get(lot_type, 'Special')  # fallback
 
-
-# =============================================================================
-# PARSING HELPERS
-# =============================================================================
-
-def classify_lot_type(raw) -> str:
-    """Exact dictionary classification. Unknown codes are surfaced (not
-    silently dropped, not silently miscounted) so they can be reviewed and
-    added to LOT_TYPE_MAP."""
-    if raw is None or str(raw).strip() == "":
-        return "Unclassified (BLANK)"
-    key = str(raw).strip().upper()
-    return LOT_TYPE_MAP.get(key, f"Unclassified ({key})")
-
-
-def try_parse_number(val):
-    """Robustly convert a cell to float. Returns None if the cell doesn't
-    represent a real number (blank, '-', 'NIL', '#DIV/0!', text notes, etc.)
-    so callers can distinguish 'no data' from 'zero'."""
-    if val is None:
-        return None
-    if isinstance(val, (int, float)):
-        return float(val)
-    s = str(val).strip().replace(",", "").replace("$", "")
-    if s in ("", "-", "\u2014", "N/A", "NIL", "#DIV/0!"):
-        return None
-    try:
-        return float(s)
-    except ValueError:
-        return None
-
-
-def to_number(val) -> float:
-    """Like try_parse_number but always returns a usable float (0.0 for
-    non-numeric/missing) — used once we've already decided a row is valid
-    data and just need safe arithmetic."""
-    parsed = try_parse_number(val)
-    return parsed if parsed is not None else 0.0
-
-
-def find_header_row(ws, max_scan: int = 10):
-    """Locate the header row by looking for a cell literally equal to
-    'BLOCK' or 'PRODUCT' (the two identifier-column headers used across
-    these report formats)."""
-    for r in range(1, max_scan + 1):
-        row_vals = [c.value for c in ws[r]]
-        for v in row_vals:
-            if isinstance(v, str) and v.strip().upper() in ("BLOCK", "PRODUCT"):
-                return r, row_vals
-    return None, None
-
-
-def find_col_exact(header_vals, name: str):
-    for i, h in enumerate(header_vals):
-        if isinstance(h, str) and h.strip().upper() == name:
-            return i
+# ------------------------------------------------------------
+# 3. Helper: find column by pattern
+# ------------------------------------------------------------
+def find_column(df, pattern):
+    for col in df.columns:
+        if pattern.lower() in col.lower():
+            return col
     return None
 
-
-def find_col_contains(header_vals, substr: str, exclude=None):
-    exclude = exclude or []
-    for i, h in enumerate(header_vals):
-        if not isinstance(h, str):
-            continue
-        hu = h.strip().upper()
-        if substr in hu and not any(ex in hu for ex in exclude):
-            return i
-    return None
-
-
-def is_footer_or_summary_row(row_vals) -> bool:
-    for v in row_vals:
-        if isinstance(v, str) and any(kw in v.strip().upper() for kw in FOOTER_KEYWORDS):
-            return True
-    return False
-
-
-def parse_sheet(ws):
-    """Parse one worksheet into a list of clean row-level records.
-
-    Returns (records, header_vals). records is [] if the sheet doesn't
-    look like an inventory sheet at all (no BLOCK/PRODUCT header found).
-    """
-    header_row_idx, header_vals = find_header_row(ws)
-    if header_row_idx is None:
-        return [], None
-
-    idx_id = find_col_exact(header_vals, "BLOCK")
-    if idx_id is None:
-        idx_id = find_col_exact(header_vals, "PRODUCT")
-    idx_lot = find_col_exact(header_vals, "LOT TYPE")
-    idx_total = find_col_exact(header_vals, "TOTAL")
-    idx_sold = find_col_exact(header_vals, "TOTAL SOLD")
-    idx_bal = find_col_exact(header_vals, "BALANCE")
-    idx_balval = find_col_contains(header_vals, "BALANCE $", exclude=["NETT"])
-
-    if idx_id is None or idx_total is None:
-        return [], header_vals
-
-    id_header_name = header_vals[idx_id].strip().upper()
-
-    records = []
-    last_id = None
-    for r in range(header_row_idx + 1, ws.max_row + 1):
-        row_vals = [c.value for c in ws[r]]
-
-        if all(v is None for v in row_vals):
-            continue  # fully blank spacer row
-
-        if is_footer_or_summary_row(row_vals):
-            continue  # sub-total / total / repeated-header row
-
-        # Forward-fill the merged identifier column (BLOCK/PRODUCT)
-        raw_id = row_vals[idx_id] if idx_id < len(row_vals) else None
-        if raw_id is not None and str(raw_id).strip() != "":
-            last_id = raw_id
-        record_id = last_id
-
-        # A row only counts as real DATA if it has a numeric TOTAL.
-        # This drops explanatory footnote rows and empty separator rows
-        # that survived the blank-row check (e.g. a row with only a
-        # LAUNCH DATE and nothing else).
-        total_num = try_parse_number(row_vals[idx_total]) if idx_total < len(row_vals) else None
-        if total_num is None:
-            continue
-
-        lot_raw = row_vals[idx_lot] if (idx_lot is not None and idx_lot < len(row_vals)) else None
-
-        # Classification: does this sheet distinguish TABLET vs NICHE via
-        # the identifier column (LST / TLT style, header = "PRODUCT"), or
-        # is the whole sheet one product type (CCK style, header = "BLOCK")?
-        if idx_lot is not None:
-            if id_header_name == "PRODUCT":
-                product_val = str(record_id).strip().upper() if record_id else ""
-                if "TABLET" in product_val:
-                    category = "Tablet"
-                else:
-                    category = f"Niche - {classify_lot_type(lot_raw)}"
-            else:
-                category = f"Niche - {classify_lot_type(lot_raw)}"
-        else:
-            category = "Tablet"  # sheet has no LOT TYPE column at all
-
-        bal_num = try_parse_number(row_vals[idx_bal]) if idx_bal is not None and idx_bal < len(row_vals) else None
-        sold_num = try_parse_number(row_vals[idx_sold]) if idx_sold is not None and idx_sold < len(row_vals) else None
-        balval_num = try_parse_number(row_vals[idx_balval]) if idx_balval is not None and idx_balval < len(row_vals) else None
-
-        bal_clean = bal_num if bal_num is not None else 0.0
-        # Fall back to Total - Balance if there's no explicit "TOTAL SOLD" column
-        sold_clean = sold_num if sold_num is not None else (total_num - bal_clean)
-
-        records.append({
-            "Row": r,
-            "Identifier": record_id,
-            "LotTypeRaw": lot_raw,
-            "Category": category,
-            "Total": total_num,
-            "Sold": sold_clean,
-            "Balance": bal_clean,
-            "BalanceValue": (balval_num or 0.0) * 1000,  # sheet stores $ in '000s
-        })
-
-    return records, header_vals
-
-
-def aggregate(records):
-    agg = defaultdict(lambda: {"Total": 0.0, "Sold": 0.0, "Balance": 0.0, "BalanceValue": 0.0, "Rows": 0})
-    for rec in records:
-        a = agg[rec["Category"]]
-        a["Total"] += rec["Total"]
-        a["Sold"] += rec["Sold"]
-        a["Balance"] += rec["Balance"]
-        a["BalanceValue"] += rec["BalanceValue"]
-        a["Rows"] += 1
-    return agg
-
-
-def agg_to_dataframe(agg: dict) -> pd.DataFrame:
-    rows = []
-    for category, v in agg.items():
-        rows.append({
-            "Category": category,
-            "Total": v["Total"],
-            "Balance": v["Balance"],
-            "Sold": v["Sold"],
-            "Balance %": (v["Balance"] / v["Total"] * 100) if v["Total"] else 0.0,
-            "Sold %": (v["Sold"] / v["Total"] * 100) if v["Total"] else 0.0,
-            "Value of Balance": v["BalanceValue"],
-            "Source Rows": v["Rows"],
-        })
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return df
-
-    # Sort using the preferred display order, unknown categories go last
-    df["_sort"] = df["Category"].apply(
-        lambda c: CATEGORY_ORDER.index(c) if c in CATEGORY_ORDER else len(CATEGORY_ORDER)
-    )
-    df = df.sort_values(["_sort", "Category"]).drop(columns="_sort").reset_index(drop=True)
-
-    # Append a Total row
-    total_row = {
-        "Category": "Total",
-        "Total": df["Total"].sum(),
-        "Balance": df["Balance"].sum(),
-        "Sold": df["Sold"].sum(),
-        "Balance %": (df["Balance"].sum() / df["Total"].sum() * 100) if df["Total"].sum() else 0.0,
-        "Sold %": (df["Sold"].sum() / df["Total"].sum() * 100) if df["Total"].sum() else 0.0,
-        "Value of Balance": df["Value of Balance"].sum(),
-        "Source Rows": df["Source Rows"].sum(),
-    }
-    df = pd.concat([df, pd.DataFrame([total_row])], ignore_index=True)
+def safe_numeric(df, col):
+    if col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    else:
+        df[col] = 0
     return df
 
+# ------------------------------------------------------------
+# 4. Sheet‑specific summarisers
+# ------------------------------------------------------------
 
-def format_display(df: pd.DataFrame) -> pd.DataFrame:
-    """String-format numeric columns for display in st.dataframe."""
-    if df.empty:
-        return df
-    out = df.copy()
-    out["Total"] = out["Total"].apply(lambda x: f"{x:,.0f}")
-    out["Balance"] = out["Balance"].apply(lambda x: f"{x:,.0f}")
-    out["Sold"] = out["Sold"].apply(lambda x: f"{x:,.0f}")
-    out["Balance %"] = out["Balance %"].apply(lambda x: f"{x:.2f}%")
-    out["Sold %"] = out["Sold %"].apply(lambda x: f"{x:.2f}%")
-    out["Value of Balance"] = out["Value of Balance"].apply(lambda x: f"${x:,.0f}")
-    out["Source Rows"] = out["Source Rows"].apply(lambda x: f"{x:,.0f}")
-    return out
+def summarize_cck_tablet(df):
+    """Return DataFrame: Block, Total, Balance, Balance%, Value."""
+    df = filter_summary_rows(df)
+    # Find necessary columns
+    total_col = find_column(df, 'total')
+    sold_col = find_column(df, 'total sold')
+    balance_col = find_column(df, 'balance')          # units
+    value_col = find_column(df, "balance $ '000 (nett)")  # nett value in thousands
+    block_col = df.columns[0]  # 'BLOCK'
 
+    if not total_col or not balance_col or not value_col:
+        st.error("CCK-TABLET: Missing required columns (TOTAL, BALANCE, BALANCE $ '000 (NETT)).")
+        return pd.DataFrame()
 
-# =============================================================================
-# STREAMLIT APP
-# =============================================================================
+    # Convert to numeric
+    for col in [total_col, sold_col, balance_col, value_col]:
+        if col:
+            df = safe_numeric(df, col)
 
-st.title("🏢 Branch Inventory Dashboard")
-st.caption("Upload the monthly inventory workbook. Every sheet is parsed generically — "
-           "no sheet names or row numbers are hard-coded.")
+    # Group by BLOCK (first column)
+    grouped = df.groupby(block_col).agg({
+        total_col: 'sum',
+        balance_col: 'sum',
+        value_col: 'sum'
+    }).reset_index()
 
-uploaded_file = st.file_uploader("Upload inventory Excel file (.xlsx)", type=["xlsx"])
+    # Compute Balance%
+    grouped['Balance %'] = (grouped[balance_col] / grouped[total_col] * 100).round(2)
 
-debug_mode = st.sidebar.checkbox("🔍 Debug mode (show row-level detail per category)", value=False)
+    # Rename columns
+    grouped.rename(columns={
+        block_col: 'Block',
+        total_col: 'Total',
+        balance_col: 'Balance',
+        value_col: 'Value ($)'
+    }, inplace=True)
+
+    # Add Total row
+    total_row = grouped[['Total', 'Balance', 'Value ($)']].sum()
+    total_row['Block'] = 'Total'
+    total_row['Balance %'] = (total_row['Balance'] / total_row['Total'] * 100).round(2)
+    grouped = pd.concat([grouped, pd.DataFrame([total_row])], ignore_index=True)
+
+    # Value in dollars (thousands * 1000)
+    grouped['Value ($)'] = grouped['Value ($)'] * 1000
+
+    return grouped[['Block', 'Total', 'Balance', 'Balance %', 'Value ($)']]
+
+def summarize_cck_niche(df):
+    """Return DataFrame with categories: Single, Double, Family, Buddha, Tower, Special."""
+    df = filter_summary_rows(df)
+    # Find columns
+    total_col = find_column(df, 'total')
+    sold_col = find_column(df, 'total sold')
+    balance_col = find_column(df, 'balance')
+    value_col = find_column(df, "balance $ '000 (nett)")
+    lot_type_col = find_column(df, 'lot type')
+
+    if not total_col or not sold_col or not balance_col or not value_col or not lot_type_col:
+        st.error("CCK-NICHE: Missing required columns.")
+        return pd.DataFrame()
+
+    # Convert numeric
+    for col in [total_col, sold_col, balance_col, value_col]:
+        df = safe_numeric(df, col)
+
+    # Map LOT TYPE
+    df['Category'] = df[lot_type_col].apply(categorize_lot_type)
+
+    # Group by Category
+    grouped = df.groupby('Category').agg({
+        total_col: 'sum',
+        sold_col: 'sum',
+        balance_col: 'sum',
+        value_col: 'sum'
+    }).reset_index()
+
+    # Compute percentages
+    grouped['Balance %'] = (grouped[balance_col] / grouped[total_col] * 100).round(2)
+    grouped['Sold %'] = (grouped[sold_col] / grouped[total_col] * 100).round(2)
+
+    # Rename
+    grouped.rename(columns={
+        'Category': 'Lot Type',
+        total_col: 'Total',
+        sold_col: 'Sold',
+        balance_col: 'Balance',
+        value_col: 'Value ($)'
+    }, inplace=True)
+
+    # Reorder categories to match expected order
+    category_order = ['Single', 'Double', 'Family', 'Buddha', 'Tower', 'Special']
+    grouped['Lot Type'] = pd.Categorical(grouped['Lot Type'], categories=category_order, ordered=True)
+    grouped = grouped.sort_values('Lot Type').reset_index(drop=True)
+
+    # Add Total row
+    total_row = grouped[['Total', 'Sold', 'Balance', 'Value ($)']].sum()
+    total_row['Lot Type'] = 'Total'
+    total_row['Balance %'] = (total_row['Balance'] / total_row['Total'] * 100).round(2)
+    total_row['Sold %'] = (total_row['Sold'] / total_row['Total'] * 100).round(2)
+    grouped = pd.concat([grouped, pd.DataFrame([total_row])], ignore_index=True)
+
+    # Value in dollars
+    grouped['Value ($)'] = grouped['Value ($)'] * 1000
+
+    return grouped[['Lot Type', 'Total', 'Balance', 'Sold', 'Balance %', 'Sold %', 'Value ($)']]
+
+def summarize_lst(df):
+    """Return dict with 'Tablet' and 'Niche' DataFrames."""
+    df = filter_summary_rows(df)
+    product_col = df.columns[0]  # 'PRODUCT'
+
+    # Find columns
+    total_col = find_column(df, 'total')
+    sold_col = find_column(df, 'total sold')
+    balance_col = find_column(df, 'balance')
+    value_col = find_column(df, "balance $ '000 (nett)")
+    suite_col = find_column(df, 'suite no.')
+    lot_type_col = find_column(df, 'lot type')
+
+    if not all([total_col, sold_col, balance_col, value_col, suite_col]):
+        st.error("LST: Missing required columns.")
+        return {}
+
+    # Convert numeric
+    for col in [total_col, sold_col, balance_col, value_col]:
+        df = safe_numeric(df, col)
+
+    # Separate products
+    tablet_df = df[df[product_col].str.upper() == 'TABLET'].copy()
+    niche_df = df[df[product_col].str.upper() == 'NICHE'].copy()
+
+    def build_product_summary(sub_df, group_col, group_name):
+        if sub_df.empty:
+            return pd.DataFrame()
+        grouped = sub_df.groupby(group_col).agg({
+            total_col: 'sum',
+            sold_col: 'sum',
+            balance_col: 'sum',
+            value_col: 'sum'
+        }).reset_index()
+        grouped['Balance %'] = (grouped[balance_col] / grouped[total_col] * 100).round(2)
+        grouped['Sold %'] = (grouped[sold_col] / grouped[total_col] * 100).round(2)
+        grouped.rename(columns={
+            group_col: group_name,
+            total_col: 'Total',
+            sold_col: 'Sold',
+            balance_col: 'Balance',
+            value_col: 'Value ($)'
+        }, inplace=True)
+        # Add total row
+        total_row = grouped[['Total', 'Sold', 'Balance', 'Value ($)']].sum()
+        total_row[group_name] = 'Total'
+        total_row['Balance %'] = (total_row['Balance'] / total_row['Total'] * 100).round(2)
+        total_row['Sold %'] = (total_row['Sold'] / total_row['Total'] * 100).round(2)
+        grouped = pd.concat([grouped, pd.DataFrame([total_row])], ignore_index=True)
+        grouped['Value ($)'] = grouped['Value ($)'] * 1000
+        return grouped[[group_name, 'Total', 'Balance', 'Sold', 'Balance %', 'Sold %', 'Value ($)']]
+
+    result = {}
+    if not tablet_df.empty:
+        result['Tablet'] = build_product_summary(tablet_df, suite_col, 'Suite')
+    if not niche_df.empty:
+        # For Niche, group by SUITE NO. (e.g., Dynasty 1, etc.)
+        result['Niche'] = build_product_summary(niche_df, suite_col, 'Suite')
+    return result
+
+def summarize_tlt(df):
+    """Return dict with 'Tablet' and 'Niche' DataFrames."""
+    df = filter_summary_rows(df)
+    product_col = df.columns[0]  # 'PRODUCT'
+
+    total_col = find_column(df, 'total')
+    sold_col = find_column(df, 'total sold')
+    balance_col = find_column(df, 'balance')
+    value_col = find_column(df, "balance $ '000 (nett)")
+    lot_type_col = find_column(df, 'lot type')
+
+    if not all([total_col, sold_col, balance_col, value_col]):
+        st.error("TLT: Missing required columns.")
+        return {}
+
+    for col in [total_col, sold_col, balance_col, value_col]:
+        df = safe_numeric(df, col)
+
+    tablet_df = df[df[product_col].str.upper() == 'TABLET'].copy()
+    niche_df = df[df[product_col].str.upper() == 'NICHE'].copy()
+
+    def build_tablet_summary(sub_df):
+        # Tablet is a single row (or aggregated)
+        if sub_df.empty:
+            return pd.DataFrame()
+        # Sum everything (should be one row anyway)
+        agg = sub_df[[total_col, sold_col, balance_col, value_col]].sum()
+        agg['Product'] = 'Tablet'
+        agg['Balance %'] = (agg[balance_col] / agg[total_col] * 100).round(2)
+        agg['Sold %'] = (agg[sold_col] / agg[total_col] * 100).round(2)
+        df_out = pd.DataFrame([agg])
+        df_out.rename(columns={
+            total_col: 'Total',
+            sold_col: 'Sold',
+            balance_col: 'Balance',
+            value_col: 'Value ($)'
+        }, inplace=True)
+        df_out['Value ($)'] = df_out['Value ($)'] * 1000
+        return df_out[['Product', 'Total', 'Balance', 'Sold', 'Balance %', 'Sold %', 'Value ($)']]
+
+    def build_niche_summary(sub_df):
+        if sub_df.empty:
+            return pd.DataFrame()
+        # Group by LOT TYPE (Single, Double)
+        grouped = sub_df.groupby(lot_type_col).agg({
+            total_col: 'sum',
+            sold_col: 'sum',
+            balance_col: 'sum',
+            value_col: 'sum'
+        }).reset_index()
+        grouped['Balance %'] = (grouped[balance_col] / grouped[total_col] * 100).round(2)
+        grouped['Sold %'] = (grouped[sold_col] / grouped[total_col] * 100).round(2)
+        grouped.rename(columns={
+            lot_type_col: 'Lot Type',
+            total_col: 'Total',
+            sold_col: 'Sold',
+            balance_col: 'Balance',
+            value_col: 'Value ($)'
+        }, inplace=True)
+        # Add Total row
+        total_row = grouped[['Total', 'Sold', 'Balance', 'Value ($)']].sum()
+        total_row['Lot Type'] = 'Total'
+        total_row['Balance %'] = (total_row['Balance'] / total_row['Total'] * 100).round(2)
+        total_row['Sold %'] = (total_row['Sold'] / total_row['Total'] * 100).round(2)
+        grouped = pd.concat([grouped, pd.DataFrame([total_row])], ignore_index=True)
+        grouped['Value ($)'] = grouped['Value ($)'] * 1000
+        return grouped[['Lot Type', 'Total', 'Balance', 'Sold', 'Balance %', 'Sold %', 'Value ($)']]
+
+    result = {}
+    if not tablet_df.empty:
+        result['Tablet'] = build_tablet_summary(tablet_df)
+    if not niche_df.empty:
+        result['Niche'] = build_niche_summary(niche_df)
+    return result
+
+# ------------------------------------------------------------
+# 5. Streamlit app
+# ------------------------------------------------------------
+st.set_page_config(page_title="Branch Inventory Dashboard", layout="wide")
+st.title("📊 Branch Inventory Dashboard")
+
+uploaded_file = st.file_uploader("Upload Excel Inventory Report", type=["xlsx"])
 
 if uploaded_file is not None:
-    wb = load_workbook(io.BytesIO(uploaded_file.read()), data_only=True)
+    # Read all sheets
+    xls = pd.ExcelFile(uploaded_file)
+    sheet_names = xls.sheet_names
 
-    all_records_by_sheet = {}
-    unclassified_found = set()
+    st.sidebar.header("Sheets available")
+    selected_sheets = st.sidebar.multiselect("Select sheets to display", sheet_names, default=sheet_names)
 
-    for sheet_name in wb.sheetnames:
-        ws = wb[sheet_name]
-        records, header_vals = parse_sheet(ws)
-        if not records:
-            continue
-        all_records_by_sheet[sheet_name] = records
-        for rec in records:
-            if "Unclassified" in rec["Category"]:
-                unclassified_found.add((sheet_name, rec["Category"], rec["Row"]))
+    # Process each selected sheet
+    for sheet in selected_sheets:
+        df = pd.read_excel(xls, sheet_name=sheet, header=0)
+        st.subheader(f"📄 {sheet}")
 
-    if not all_records_by_sheet:
-        st.error("No recognizable inventory sheets found (expected a header row containing "
-                  "'BLOCK' or 'PRODUCT').")
-        st.stop()
-
-    if unclassified_found:
-        with st.expander(f"⚠️ {len(unclassified_found)} row(s) had an unrecognized LOT TYPE — "
-                          f"they were kept but bucketed separately, not silently dropped or "
-                          f"miscounted. Add them to LOT_TYPE_MAP to classify properly.", expanded=False):
-            udf = pd.DataFrame(sorted(unclassified_found), columns=["Sheet", "Category", "Excel Row"])
-            st.dataframe(udf, use_container_width=True, hide_index=True)
-
-    tab_names = list(all_records_by_sheet.keys()) + ["📊 Combined Summary"]
-    tabs = st.tabs(tab_names)
-
-    combined_agg = defaultdict(lambda: {"Total": 0.0, "Sold": 0.0, "Balance": 0.0, "BalanceValue": 0.0, "Rows": 0})
-
-    for tab, sheet_name in zip(tabs, all_records_by_sheet.keys()):
-        with tab:
-            records = all_records_by_sheet[sheet_name]
-            agg = aggregate(records)
-
-            for cat, v in agg.items():
-                for k in ("Total", "Sold", "Balance", "BalanceValue", "Rows"):
-                    combined_agg[cat][k] += v[k]
-
-            df = agg_to_dataframe(agg)
-            st.subheader(sheet_name)
-            st.dataframe(format_display(df), use_container_width=True, hide_index=True)
-
-            if debug_mode:
-                st.markdown("**Debug: row-level detail feeding each category**")
-                cat_options = sorted({r["Category"] for r in records})
-                chosen_cat = st.selectbox(
-                    "Show raw rows contributing to category:",
-                    cat_options, key=f"debug_{sheet_name}"
+        # Identify sheet type by name
+        if sheet.upper().startswith("CCK-TABLET"):
+            summary = summarize_cck_tablet(df)
+            if not summary.empty:
+                st.dataframe(
+                    summary.style.format({
+                        'Total': '{:,.0f}',
+                        'Balance': '{:,.0f}',
+                        'Balance %': '{:.2f}%',
+                        'Value ($)': '${:,.2f}'
+                    }),
+                    use_container_width=True
                 )
-                detail_rows = [r for r in records if r["Category"] == chosen_cat]
-                detail_df = pd.DataFrame(detail_rows)[
-                    ["Row", "Identifier", "LotTypeRaw", "Total", "Balance", "Sold", "BalanceValue"]
-                ]
-                st.dataframe(detail_df, use_container_width=True, hide_index=True)
-                st.caption(f"{len(detail_rows)} row(s) → Total = {detail_df['Total'].sum():,.0f}")
+            else:
+                st.warning("No data after filtering.")
 
-    with tabs[-1]:
-        st.subheader("Combined Summary — All Sheets")
-        combined_df = agg_to_dataframe(combined_agg)
-        st.dataframe(format_display(combined_df), use_container_width=True, hide_index=True)
+        elif sheet.upper().startswith("CCK-NICHE"):
+            summary = summarize_cck_niche(df)
+            if not summary.empty:
+                st.dataframe(
+                    summary.style.format({
+                        'Total': '{:,.0f}',
+                        'Balance': '{:,.0f}',
+                        'Sold': '{:,.0f}',
+                        'Balance %': '{:.2f}%',
+                        'Sold %': '{:.2f}%',
+                        'Value ($)': '${:,.2f}'
+                    }),
+                    use_container_width=True
+                )
+            else:
+                st.warning("No data after filtering.")
 
-        grand_total = combined_df.loc[combined_df["Category"] == "Total", "Total"].values
-        if len(grand_total):
-            st.metric("Grand Total Units", f"{grand_total[0]:,.0f}")
+        elif sheet.upper().startswith("LST"):
+            summaries = summarize_lst(df)
+            if summaries:
+                for prod, sub_df in summaries.items():
+                    st.markdown(f"**{prod}**")
+                    if not sub_df.empty:
+                        st.dataframe(
+                            sub_df.style.format({
+                                'Total': '{:,.0f}',
+                                'Balance': '{:,.0f}',
+                                'Sold': '{:,.0f}',
+                                'Balance %': '{:.2f}%',
+                                'Sold %': '{:.2f}%',
+                                'Value ($)': '${:,.2f}'
+                            }),
+                            use_container_width=True
+                        )
+                    else:
+                        st.info(f"No {prod} data.")
+            else:
+                st.warning("No data after filtering.")
 
+        elif sheet.upper().startswith("TLT"):
+            summaries = summarize_tlt(df)
+            if summaries:
+                for prod, sub_df in summaries.items():
+                    st.markdown(f"**{prod}**")
+                    if not sub_df.empty:
+                        st.dataframe(
+                            sub_df.style.format({
+                                'Total': '{:,.0f}',
+                                'Balance': '{:,.0f}',
+                                'Sold': '{:,.0f}',
+                                'Balance %': '{:.2f}%',
+                                'Sold %': '{:.2f}%',
+                                'Value ($)': '${:,.2f}'
+                            }),
+                            use_container_width=True
+                        )
+                    else:
+                        st.info(f"No {prod} data.")
+            else:
+                st.warning("No data after filtering.")
+
+        else:
+            st.info(f"Sheet '{sheet}' is not recognised; displaying raw data (first 5 rows).")
+            st.dataframe(df.head())
+
+    # Optional debug print (if user wants to see which rows contributed to a category)
+    # Uncomment to add a debug button
+    if st.sidebar.checkbox("Debug: show rows for 'Niche - Single' category (CCK-NICHE only)"):
+        # This will only work if CCK-NICHE sheet is loaded and we capture its dataframe
+        # For simplicity, we'll re-read the sheet and show rows
+        if 'CCK-NICHE' in sheet_names:
+            df_debug = pd.read_excel(xls, sheet_name='CCK-NICHE', header=0)
+            df_debug = filter_summary_rows(df_debug)
+            lot_col = find_column(df_debug, 'lot type')
+            if lot_col:
+                df_debug['Category'] = df_debug[lot_col].apply(categorize_lot_type)
+                single_rows = df_debug[df_debug['Category'] == 'Single']
+                st.subheader("Debug: Rows classified as 'Single'")
+                st.dataframe(single_rows)
+        else:
+            st.info("CCK-NICHE sheet not loaded.")
 else:
-    st.info("👆 Upload an .xlsx file to get started.")
+    st.info("Please upload an Excel file to begin.")
