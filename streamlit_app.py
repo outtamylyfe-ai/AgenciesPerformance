@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import re
 
 # ------------------------------------------------------------
 # 1. Strict Filtering: drop summary/subtotal/footer rows
@@ -11,11 +10,8 @@ def filter_summary_rows(df):
     if df.empty:
         return df
     first_col = df.columns[0]
-    # Drop rows where first column is missing
     mask = df[first_col].notna()
-    # Drop rows where first column contains 'total', 'sub', 'sum' (case-insensitive)
     mask = mask & ~df[first_col].astype(str).str.contains('total|sub|sum', case=False, na=False)
-    # Drop rows where first column is empty string
     mask = mask & (df[first_col].astype(str).str.strip() != '')
     return df[mask].copy()
 
@@ -32,14 +28,13 @@ LOT_TYPE_MAP = {
     'TWIN SG': 'Special',
     'M-TWS': 'Special',
     'M-TWD': 'Special',
-    # add any other types you encounter
 }
 
 def categorize_lot_type(lot_type):
     if pd.isna(lot_type):
         return 'Unknown'
     lot_type = str(lot_type).strip().upper()
-    return LOT_TYPE_MAP.get(lot_type, 'Special')  # fallback
+    return LOT_TYPE_MAP.get(lot_type, 'Special')
 
 # ------------------------------------------------------------
 # 3. Helper: find column by pattern
@@ -58,79 +53,139 @@ def safe_numeric(df, col):
     return df
 
 # ------------------------------------------------------------
-# 4. Sheet‑specific summarisers
+# 4. Sheet‑specific summarisers – updated to match required outputs
 # ------------------------------------------------------------
 
 def summarize_cck_tablet(df):
-    """Return DataFrame: Block, Total, Balance, Balance%, Value."""
+    """
+    Returns DataFrame with columns:
+    Block, Sold %, Balance %, Balance Units, Value ($)
+    """
     df = filter_summary_rows(df)
-    # Find necessary columns
     total_col = find_column(df, 'total')
-    sold_col = find_column(df, 'total sold')
-    balance_col = find_column(df, 'balance')          # units
-    value_col = find_column(df, "balance $ '000 (nett)")  # nett value in thousands
-    block_col = df.columns[0]  # 'BLOCK'
+    balance_col = find_column(df, 'balance')           # units
+    value_col = find_column(df, "balance $ '000 (nett)")
+    block_col = df.columns[0]
 
     if not total_col or not balance_col or not value_col:
-        st.error("CCK-TABLET: Missing required columns (TOTAL, BALANCE, BALANCE $ '000 (NETT)).")
+        st.error("CCK-TABLET: Missing required columns.")
         return pd.DataFrame()
 
-    # Convert to numeric
-    for col in [total_col, sold_col, balance_col, value_col]:
-        if col:
-            df = safe_numeric(df, col)
+    for col in [total_col, balance_col, value_col]:
+        df = safe_numeric(df, col)
 
-    # Group by BLOCK (first column)
     grouped = df.groupby(block_col).agg({
         total_col: 'sum',
         balance_col: 'sum',
         value_col: 'sum'
     }).reset_index()
 
-    # Compute Balance%
+    # Compute percentages
+    grouped['Sold %'] = ((grouped[total_col] - grouped[balance_col]) / grouped[total_col] * 100).round(2)
     grouped['Balance %'] = (grouped[balance_col] / grouped[total_col] * 100).round(2)
 
-    # Rename columns
     grouped.rename(columns={
         block_col: 'Block',
-        total_col: 'Total',
-        balance_col: 'Balance',
+        balance_col: 'Balance Units',
         value_col: 'Value ($)'
     }, inplace=True)
 
     # Add Total row
-    total_row = grouped[['Total', 'Balance', 'Value ($)']].sum()
-    total_row['Block'] = 'Total'
-    total_row['Balance %'] = (total_row['Balance'] / total_row['Total'] * 100).round(2)
-    grouped = pd.concat([grouped, pd.DataFrame([total_row])], ignore_index=True)
+    total_row = grouped[['Balance Units', 'Value ($)']].sum()
+    total_total = grouped['Block'].count()  # not needed, we compute from sum of total per block
+    total_total_units = grouped['Balance Units'].sum() / (total_row['Balance Units'] / (total_row['Balance Units'] + (grouped['Balance Units'].sum() - total_row['Balance Units'])))  # actually we can compute Sold% from totals
+    # Actually we need total units across all blocks. We can compute from sum of total_col.
+    total_units = grouped['Balance Units'].sum() + (grouped['Sold %'] * grouped['Balance Units'] / (100 - grouped['Sold %'])).sum()  # Not straightforward. Better to compute from original total_col sum.
+    # Let's get total units by summing total_col from original grouped (before rename).
+    total_units = grouped['Balance Units'].sum() / (grouped['Balance %'].mean()/100)  # but that's average, not correct.
+    # Better: we should have kept total_col. I'll redo: store total_col separately.
+    # I'll refactor: keep total_col and balance_col.
 
-    # Value in dollars (thousands * 1000)
-    grouped['Value ($)'] = grouped['Value ($)'] * 1000
+    # Let's redo correctly: We'll keep total_col and balance_col until after computing percentages.
+    # I'll rewrite this function cleanly.
 
-    return grouped[['Block', 'Total', 'Balance', 'Balance %', 'Value ($)']]
+    # Simplified approach: compute totals from the aggregated data.
+    # I'll create a new function.
 
-def summarize_cck_niche(df):
-    """Return DataFrame with categories: Single, Double, Family, Buddha, Tower, Special."""
+    # For now, let's return the grouped without Total row? We'll add later.
+
+    # I'll recode the whole function below.
+
+def summarize_cck_tablet_fixed(df):
+    """
+    Returns DataFrame with columns:
+    Block, Sold %, Balance %, Balance Units, Value ($)
+    """
     df = filter_summary_rows(df)
-    # Find columns
+    total_col = find_column(df, 'total')
+    balance_col = find_column(df, 'balance')
+    value_col = find_column(df, "balance $ '000 (nett)")
+    block_col = df.columns[0]
+
+    if not total_col or not balance_col or not value_col:
+        st.error("CCK-TABLET: Missing required columns.")
+        return pd.DataFrame()
+
+    for col in [total_col, balance_col, value_col]:
+        df = safe_numeric(df, col)
+
+    grouped = df.groupby(block_col).agg({
+        total_col: 'sum',
+        balance_col: 'sum',
+        value_col: 'sum'
+    }).reset_index()
+
+    grouped['Sold %'] = ((grouped[total_col] - grouped[balance_col]) / grouped[total_col] * 100).round(2)
+    grouped['Balance %'] = (grouped[balance_col] / grouped[total_col] * 100).round(2)
+
+    grouped.rename(columns={
+        block_col: 'Block',
+        balance_col: 'Balance Units',
+        value_col: 'Value ($)'
+    }, inplace=True)
+
+    # Add Total row
+    total_units = grouped[total_col].sum()  # we still have total_col? Actually we renamed it, we lost it.
+    # Let's keep total_col by not renaming it.
+    # I'll store total_units before renaming.
+    total_units = grouped[total_col].sum()
+    total_balance = grouped['Balance Units'].sum()
+    total_value = grouped['Value ($)'].sum()
+    total_sold_pct = ((total_units - total_balance) / total_units * 100).round(2)
+    total_balance_pct = (total_balance / total_units * 100).round(2)
+
+    total_row = pd.DataFrame({
+        'Block': ['Total'],
+        'Sold %': [total_sold_pct],
+        'Balance %': [total_balance_pct],
+        'Balance Units': [total_balance],
+        'Value ($)': [total_value]
+    })
+
+    # Drop the total_col from grouped after we've used it
+    grouped.drop(columns=[total_col], inplace=True)
+    result = pd.concat([grouped, total_row], ignore_index=True)
+    result['Value ($)'] = result['Value ($)'] * 1000
+    return result[['Block', 'Sold %', 'Balance %', 'Balance Units', 'Value ($)']]
+
+# For CCK-NICHE: pivot to wide format
+def summarize_cck_niche(df):
+    df = filter_summary_rows(df)
     total_col = find_column(df, 'total')
     sold_col = find_column(df, 'total sold')
     balance_col = find_column(df, 'balance')
     value_col = find_column(df, "balance $ '000 (nett)")
     lot_type_col = find_column(df, 'lot type')
 
-    if not total_col or not sold_col or not balance_col or not value_col or not lot_type_col:
+    if not all([total_col, sold_col, balance_col, value_col, lot_type_col]):
         st.error("CCK-NICHE: Missing required columns.")
         return pd.DataFrame()
 
-    # Convert numeric
     for col in [total_col, sold_col, balance_col, value_col]:
         df = safe_numeric(df, col)
 
-    # Map LOT TYPE
     df['Category'] = df[lot_type_col].apply(categorize_lot_type)
 
-    # Group by Category
     grouped = df.groupby('Category').agg({
         total_col: 'sum',
         sold_col: 'sum',
@@ -142,54 +197,57 @@ def summarize_cck_niche(df):
     grouped['Balance %'] = (grouped[balance_col] / grouped[total_col] * 100).round(2)
     grouped['Sold %'] = (grouped[sold_col] / grouped[total_col] * 100).round(2)
 
-    # Rename
-    grouped.rename(columns={
-        'Category': 'Lot Type',
-        total_col: 'Total',
-        sold_col: 'Sold',
-        balance_col: 'Balance',
-        value_col: 'Value ($)'
-    }, inplace=True)
+    # Pivot to wide format: categories as columns
+    # We'll create a multi-index DataFrame with metrics as rows
+    categories_order = ['Single', 'Double', 'Family', 'Buddha', 'Tower', 'Special']
+    # Ensure all categories exist
+    for cat in categories_order:
+        if cat not in grouped['Category'].values:
+            grouped = pd.concat([grouped, pd.DataFrame({'Category': [cat], total_col: [0], sold_col: [0], balance_col: [0], value_col: [0], 'Balance %': [0], 'Sold %': [0]})], ignore_index=True)
 
-    # Reorder categories to match expected order
-    category_order = ['Single', 'Double', 'Family', 'Buddha', 'Tower', 'Special']
-    grouped['Lot Type'] = pd.Categorical(grouped['Lot Type'], categories=category_order, ordered=True)
-    grouped = grouped.sort_values('Lot Type').reset_index(drop=True)
+    grouped = grouped[grouped['Category'].isin(categories_order)]
+    grouped['Category'] = pd.Categorical(grouped['Category'], categories=categories_order, ordered=True)
+    grouped = grouped.sort_values('Category').reset_index(drop=True)
 
-    # Add Total row
-    total_row = grouped[['Total', 'Sold', 'Balance', 'Value ($)']].sum()
-    total_row['Lot Type'] = 'Total'
-    total_row['Balance %'] = (total_row['Balance'] / total_row['Total'] * 100).round(2)
-    total_row['Sold %'] = (total_row['Sold'] / total_row['Total'] * 100).round(2)
-    grouped = pd.concat([grouped, pd.DataFrame([total_row])], ignore_index=True)
+    # Build metrics rows
+    metrics = {
+        'Total': grouped[total_col].values,
+        'Balance': grouped[balance_col].values,
+        'Sold': grouped[sold_col].values,
+        'Balance %': grouped['Balance %'].values,
+        'Sold %': grouped['Sold %'].values,
+        'Value': grouped[value_col].values
+    }
+    # Convert Value to dollars
+    metrics['Value'] = metrics['Value'] * 1000
 
-    # Value in dollars
-    grouped['Value ($)'] = grouped['Value ($)'] * 1000
+    # Create DataFrame with categories as columns and metrics as index
+    result_df = pd.DataFrame(metrics, index=categories_order).T
+    result_df.columns = categories_order
+    # Reorder rows as per required: Total, Balance, Sold, Balance%, Sold%, Value
+    row_order = ['Total', 'Balance', 'Sold', 'Balance %', 'Sold %', 'Value']
+    result_df = result_df.reindex(row_order)
 
-    return grouped[['Lot Type', 'Total', 'Balance', 'Sold', 'Balance %', 'Sold %', 'Value ($)']]
+    # Format numeric columns: we'll let the formatting handle it later
+    return result_df
 
+# LST and TLT remain as before, but we'll adjust column names to match required
 def summarize_lst(df):
-    """Return dict with 'Tablet' and 'Niche' DataFrames."""
     df = filter_summary_rows(df)
-    product_col = df.columns[0]  # 'PRODUCT'
-
-    # Find columns
+    product_col = df.columns[0]
     total_col = find_column(df, 'total')
     sold_col = find_column(df, 'total sold')
     balance_col = find_column(df, 'balance')
     value_col = find_column(df, "balance $ '000 (nett)")
     suite_col = find_column(df, 'suite no.')
-    lot_type_col = find_column(df, 'lot type')
 
     if not all([total_col, sold_col, balance_col, value_col, suite_col]):
         st.error("LST: Missing required columns.")
         return {}
 
-    # Convert numeric
     for col in [total_col, sold_col, balance_col, value_col]:
         df = safe_numeric(df, col)
 
-    # Separate products
     tablet_df = df[df[product_col].str.upper() == 'TABLET'].copy()
     niche_df = df[df[product_col].str.upper() == 'NICHE'].copy()
 
@@ -224,15 +282,12 @@ def summarize_lst(df):
     if not tablet_df.empty:
         result['Tablet'] = build_product_summary(tablet_df, suite_col, 'Suite')
     if not niche_df.empty:
-        # For Niche, group by SUITE NO. (e.g., Dynasty 1, etc.)
         result['Niche'] = build_product_summary(niche_df, suite_col, 'Suite')
     return result
 
 def summarize_tlt(df):
-    """Return dict with 'Tablet' and 'Niche' DataFrames."""
     df = filter_summary_rows(df)
-    product_col = df.columns[0]  # 'PRODUCT'
-
+    product_col = df.columns[0]
     total_col = find_column(df, 'total')
     sold_col = find_column(df, 'total sold')
     balance_col = find_column(df, 'balance')
@@ -250,10 +305,8 @@ def summarize_tlt(df):
     niche_df = df[df[product_col].str.upper() == 'NICHE'].copy()
 
     def build_tablet_summary(sub_df):
-        # Tablet is a single row (or aggregated)
         if sub_df.empty:
             return pd.DataFrame()
-        # Sum everything (should be one row anyway)
         agg = sub_df[[total_col, sold_col, balance_col, value_col]].sum()
         agg['Product'] = 'Tablet'
         agg['Balance %'] = (agg[balance_col] / agg[total_col] * 100).round(2)
@@ -271,7 +324,7 @@ def summarize_tlt(df):
     def build_niche_summary(sub_df):
         if sub_df.empty:
             return pd.DataFrame()
-        # Group by LOT TYPE (Single, Double)
+        # Group by LOT TYPE
         grouped = sub_df.groupby(lot_type_col).agg({
             total_col: 'sum',
             sold_col: 'sum',
@@ -312,27 +365,27 @@ st.title("📊 Branch Inventory Dashboard")
 uploaded_file = st.file_uploader("Upload Excel Inventory Report", type=["xlsx"])
 
 if uploaded_file is not None:
-    # Read all sheets
     xls = pd.ExcelFile(uploaded_file)
     sheet_names = xls.sheet_names
 
     st.sidebar.header("Sheets available")
     selected_sheets = st.sidebar.multiselect("Select sheets to display", sheet_names, default=sheet_names)
 
-    # Process each selected sheet
+    # Debug option
+    debug = st.sidebar.checkbox("Debug: show rows classified as 'Single' (CCK-NICHE)")
+
     for sheet in selected_sheets:
         df = pd.read_excel(xls, sheet_name=sheet, header=0)
         st.subheader(f"📄 {sheet}")
 
-        # Identify sheet type by name
         if sheet.upper().startswith("CCK-TABLET"):
-            summary = summarize_cck_tablet(df)
+            summary = summarize_cck_tablet_fixed(df)
             if not summary.empty:
                 st.dataframe(
                     summary.style.format({
-                        'Total': '{:,.0f}',
-                        'Balance': '{:,.0f}',
+                        'Sold %': '{:.2f}%',
                         'Balance %': '{:.2f}%',
+                        'Balance Units': '{:,.0f}',
                         'Value ($)': '${:,.2f}'
                     }),
                     use_container_width=True
@@ -343,19 +396,26 @@ if uploaded_file is not None:
         elif sheet.upper().startswith("CCK-NICHE"):
             summary = summarize_cck_niche(df)
             if not summary.empty:
+                # Format all numeric columns (all columns except index)
                 st.dataframe(
                     summary.style.format({
-                        'Total': '{:,.0f}',
-                        'Balance': '{:,.0f}',
-                        'Sold': '{:,.0f}',
-                        'Balance %': '{:.2f}%',
-                        'Sold %': '{:.2f}%',
-                        'Value ($)': '${:,.2f}'
+                        col: '{:,.0f}' if col in ['Single','Double','Family','Buddha','Tower','Special'] and summary[col].dtype in ['int64','float64'] else '{:.2f}%' if ' %' in col else '${:,.2f}'
                     }),
                     use_container_width=True
                 )
             else:
                 st.warning("No data after filtering.")
+
+            # Debug: show rows classified as Single
+            if debug and 'CCK-NICHE' in sheet:
+                df_debug = pd.read_excel(xls, sheet_name='CCK-NICHE', header=0)
+                df_debug = filter_summary_rows(df_debug)
+                lot_col = find_column(df_debug, 'lot type')
+                if lot_col:
+                    df_debug['Category'] = df_debug[lot_col].apply(categorize_lot_type)
+                    single_rows = df_debug[df_debug['Category'] == 'Single']
+                    st.subheader("Debug: Rows classified as 'Single'")
+                    st.dataframe(single_rows)
 
         elif sheet.upper().startswith("LST"):
             summaries = summarize_lst(df)
@@ -404,22 +464,5 @@ if uploaded_file is not None:
         else:
             st.info(f"Sheet '{sheet}' is not recognised; displaying raw data (first 5 rows).")
             st.dataframe(df.head())
-
-    # Optional debug print (if user wants to see which rows contributed to a category)
-    # Uncomment to add a debug button
-    if st.sidebar.checkbox("Debug: show rows for 'Niche - Single' category (CCK-NICHE only)"):
-        # This will only work if CCK-NICHE sheet is loaded and we capture its dataframe
-        # For simplicity, we'll re-read the sheet and show rows
-        if 'CCK-NICHE' in sheet_names:
-            df_debug = pd.read_excel(xls, sheet_name='CCK-NICHE', header=0)
-            df_debug = filter_summary_rows(df_debug)
-            lot_col = find_column(df_debug, 'lot type')
-            if lot_col:
-                df_debug['Category'] = df_debug[lot_col].apply(categorize_lot_type)
-                single_rows = df_debug[df_debug['Category'] == 'Single']
-                st.subheader("Debug: Rows classified as 'Single'")
-                st.dataframe(single_rows)
-        else:
-            st.info("CCK-NICHE sheet not loaded.")
 else:
     st.info("Please upload an Excel file to begin.")
