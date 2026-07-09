@@ -7,12 +7,13 @@ import altair as alt
 # ------------------------------------------------------------
 # 1. STRICT FILTERING – removes any summary/subtotal/footer rows
 # ------------------------------------------------------------
-def filter_summary_rows(df):
+def filter_summary_rows(df, extra_cols=None):
     """
     Drop rows where:
       - first column is empty
       - first column contains 'TOTAL', 'SUB', or 'SUM' (whole words)
       - the 'NAME' column (if present) contains those keywords
+      - any extra column (e.g., 'SUITE NO.', 'LOT TYPE') is missing or contains keywords
     """
     if df.empty:
         return df
@@ -27,6 +28,14 @@ def filter_summary_rows(df):
     name_col = next((c for c in df.columns if c.lower() == 'name'), None)
     if name_col is not None:
         mask = mask & ~df[name_col].astype(str).str.contains(pattern, case=False, na=False, regex=True)
+
+    # If extra columns are provided, also filter them
+    if extra_cols:
+        for col in extra_cols:
+            if col in df.columns:
+                mask = mask & df[col].notna()
+                mask = mask & (df[col].astype(str).str.strip() != '')
+                mask = mask & ~df[col].astype(str).str.contains(pattern, case=False, na=False, regex=True)
 
     return df[mask].copy()
 
@@ -72,7 +81,7 @@ def safe_numeric(df, col):
 # ------------------------------------------------------------
 def summarize_cck_tablet(df):
     """Returns: Block, Sold %, Balance %, Balance Units, Value ($)"""
-    df = filter_summary_rows(df)
+    df = filter_summary_rows(df, extra_cols=None)  # No extra cols needed
     total_col = find_column(df, 'total')
     balance_col = find_column(df, 'balance')
     value_col = find_column(df, "balance $ '000 (nett)")
@@ -121,7 +130,7 @@ def summarize_cck_tablet(df):
 
 def summarize_cck_niche(df):
     """Wide‑format matrix: categories as columns, metrics as rows."""
-    df = filter_summary_rows(df)
+    df = filter_summary_rows(df, extra_cols=None)  # We'll handle LOT TYPE manually
 
     total_col = find_column(df, 'total')
     sold_col = find_column(df, 'total sold')
@@ -136,8 +145,7 @@ def summarize_cck_niche(df):
     for col in [total_col, sold_col, balance_col, value_col]:
         df = safe_numeric(df, col)
 
-    # ---- CRITICAL EXTRA FILTER ----
-    # Drop rows where LOT TYPE is missing or contains summary keywords
+    # Extra filtering on LOT TYPE
     df = df[df[lot_type_col].notna()]
     df = df[~df[lot_type_col].astype(str).str.contains(r'\b(total|sub|sum)\b', case=False, na=False, regex=True)]
     df = df[df[lot_type_col].astype(str).str.strip() != '']
@@ -188,7 +196,9 @@ def summarize_cck_niche(df):
     return result_df
 
 def summarize_lst(df):
-    df = filter_summary_rows(df)
+    """Group by SUITE NO. for Tablet and Niche separately."""
+    # Apply filtering on first column, and also on SUITE NO. and LOT TYPE
+    df = filter_summary_rows(df, extra_cols=['SUITE NO.', 'LOT TYPE'])
     product_col = df.columns[0]
     total_col = find_column(df, 'total')
     sold_col = find_column(df, 'total sold')
@@ -240,7 +250,8 @@ def summarize_lst(df):
     return result
 
 def summarize_tlt(df):
-    df = filter_summary_rows(df)
+    """Tablet: single row; Niche: group by LOT TYPE."""
+    df = filter_summary_rows(df, extra_cols=['SUITE NO.', 'LOT TYPE'])
     product_col = df.columns[0]
     total_col = find_column(df, 'total')
     sold_col = find_column(df, 'total sold')
@@ -326,11 +337,11 @@ def show_metric_cards(df, prefix):
     if df.empty:
         return
     cols = st.columns(4)
-    # For tablet summary, we use last row as Total
     total_row = df[df['Block'] == 'Total'] if 'Block' in df.columns else None
     if total_row is not None and not total_row.empty:
         total = total_row.iloc[0]
-        cols[0].metric(f"{prefix} Total Units", f"{total['Balance Units'] + (total['Balance Units'] / (total['Balance %']/100) - total['Balance Units']):,.0f}")
+        total_units = total['Balance Units'] + (total['Balance Units'] / (total['Balance %']/100) - total['Balance Units'])
+        cols[0].metric(f"{prefix} Total Units", f"{total_units:,.0f}")
         cols[1].metric(f"{prefix} Balance Units", f"{total['Balance Units']:,.0f}")
         cols[2].metric(f"{prefix} Sold %", f"{total['Sold %']:.2f}%")
         cols[3].metric(f"{prefix} Balance Value", f"${total['Value ($)']:,.2f}")
@@ -360,10 +371,7 @@ if uploaded_file is not None:
         if sheet.upper().startswith("CCK-TABLET"):
             summary = summarize_cck_tablet(df)
             if not summary.empty:
-                # Metric cards
                 show_metric_cards(summary, "Tablet")
-
-                # Table
                 st.dataframe(
                     summary.style.format({
                         'Sold %': '{:.2f}%',
@@ -373,8 +381,6 @@ if uploaded_file is not None:
                     }),
                     use_container_width=True
                 )
-
-                # Bar chart
                 chart_df = summary[summary['Block'] != 'Total']
                 if not chart_df.empty:
                     chart = plot_balance_units(chart_df, 'Block', 'Balance Units', 'Balance Units by Block')
@@ -385,7 +391,6 @@ if uploaded_file is not None:
         elif sheet.upper().startswith("CCK-NICHE"):
             summary = summarize_cck_niche(df)
             if not summary.empty:
-                # Metric cards – overall totals
                 total_units = summary.loc['Total'].sum()
                 total_balance = summary.loc['Balance'].sum()
                 total_sold = summary.loc['Sold'].sum()
@@ -396,7 +401,6 @@ if uploaded_file is not None:
                 cols[2].metric("Sold %", f"{(total_sold/total_units*100):.2f}%")
                 cols[3].metric("Total Balance Value", f"${total_value:,.2f}")
 
-                # Table with formatting
                 fmt = {}
                 for col in summary.columns:
                     if summary[col].dtype in ['int64', 'float64']:
@@ -408,18 +412,15 @@ if uploaded_file is not None:
                             fmt[col] = '{:,.0f}'
                 st.dataframe(summary.style.format(fmt), use_container_width=True)
 
-                # Bar chart for balance units per category (excluding Total)
                 chart_data = summary.loc[['Balance']].T.reset_index()
                 chart_data.columns = ['Category', 'Balance']
                 chart_data = chart_data[chart_data['Category'] != 'Total']
                 if not chart_data.empty:
                     chart = plot_balance_units(chart_data, 'Category', 'Balance', 'Balance Units by Category')
                     st.altair_chart(chart, use_container_width=True)
-
             else:
                 st.warning("No data after filtering.")
 
-            # Debug
             if debug and 'CCK-NICHE' in sheet:
                 df_debug = pd.read_excel(xls, sheet_name='CCK-NICHE', header=0)
                 df_debug = filter_summary_rows(df_debug)
@@ -483,6 +484,3 @@ if uploaded_file is not None:
 
 else:
     st.info("⬆️ Please upload an Excel file to start the analysis.")
-            st.dataframe(df.head())
-else:
-    st.info("Please upload an Excel file to begin.")
