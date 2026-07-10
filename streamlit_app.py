@@ -1,486 +1,353 @@
-import streamlit as st
 import pandas as pd
-import numpy as np
-import re
-import altair as alt
+import streamlit as st
+import plotly.express as px
+import plotly.io as pio
+from fpdf import FPDF
+import tempfile
+import os
 
-# ------------------------------------------------------------
-# 1. STRICT FILTERING – removes any summary/subtotal/footer rows
-# ------------------------------------------------------------
-def filter_summary_rows(df, extra_cols=None):
-    """
-    Drop rows where:
-      - first column is empty
-      - first column contains 'TOTAL', 'SUB', or 'SUM' (whole words)
-      - the 'NAME' column (if present) contains those keywords
-      - any extra column (e.g., 'SUITE NO.', 'LOT TYPE') is missing or contains keywords
-    """
-    if df.empty:
-        return df
+# Configure dashboard workspace layout
+st.set_page_config(page_title="Multi-Month Sales Report Dashboard", layout="wide")
+st.title("📊 Multi-Month Closed Sales Report Dashboard")
 
-    first_col = df.columns[0]
-    mask = df[first_col].notna() & (df[first_col].astype(str).str.strip() != '')
+# --- 1. DYNAMIC MULTI-FILE UPLOADER ENGINE ---
+uploaded_files = st.file_uploader(
+    "📂 Upload Closed Sales Report Excel Sheets (Select single or multiple months)", 
+    type=["xlsx"], 
+    accept_multiple_files=True
+)
 
-    pattern = r'\b(total|sub|sum)\b'
-    mask = mask & ~df[first_col].astype(str).str.contains(pattern, case=False, na=False, regex=True)
+if uploaded_files:
+    all_months_data = []
+    
+    # Process each uploaded file
+    for uploaded_file in uploaded_files:
+        # Read the sheet, starting headers at row index 4 (5th row)
+        df_month = pd.read_excel(uploaded_file, sheet_name=0, header=4)
+        df_month.columns = [str(c).strip() for c in df_month.columns]
+        
+        # Deduce Month name from file name (e.g., "Jan closed sales.xlsx" -> "Jan")
+        file_name = uploaded_file.name
+        detected_month = file_name.split()[0].title() if " " in file_name else file_name.split(".")[0].title()
+        df_month['Report_Month'] = detected_month
+        
+        all_months_data.append(df_month)
+        
+    # Combine all uploaded data into a single master frame
+    df_master = pd.concat(all_months_data, ignore_index=True)
 
-    # Check NAME column if it exists
-    name_col = next((c for c in df.columns if c.lower() == 'name'), None)
-    if name_col is not None:
-        mask = mask & ~df[name_col].astype(str).str.contains(pattern, case=False, na=False, regex=True)
+    # 🎯 Dynamically find the correct column header for Sales
+    target_value_col = None
+    for col in df_master.columns:
+        if 'net' in col.lower() and 'main' in col.lower():
+            target_value_col = col
+            break
 
-    # If extra columns are provided, also filter them
-    if extra_cols:
-        for col in extra_cols:
-            if col in df.columns:
-                mask = mask & df[col].notna()
-                mask = mask & (df[col].astype(str).str.strip() != '')
-                mask = mask & ~df[col].astype(str).str.contains(pattern, case=False, na=False, regex=True)
+    if not target_value_col:
+        target_value_col = 'Net main product'
 
-    return df[mask].copy()
+    # 2. 🎯 CRITICAL RE-INCLUSION: Only preserve rows with 'CONFIRM' status and exclude 'BOOK'
+    df_confirm = df_master[df_master['STATUS'] == 'CONFIRM'].copy()
 
-# ------------------------------------------------------------
-# 2. EXACT LOT TYPE MAPPING
-# ------------------------------------------------------------
-LOT_TYPE_MAP = {
-    'SINGLE': 'Single',
-    'DOUBLE': 'Double',
-    'FAMILY': 'Family',
-    'TOWER': 'Tower',
-    'U-BUDDHA': 'Buddha',
-    'TWIN DB': 'Special',
-    'TWIN SG': 'Special',
-    'M-TWS': 'Special',
-    'M-TWD': 'Special',
-}
-
-def categorize_lot_type(val):
-    if pd.isna(val):
-        return 'Unknown'
-    val = str(val).strip().upper()
-    return LOT_TYPE_MAP.get(val, 'Special')
-
-# ------------------------------------------------------------
-# 3. HELPERS
-# ------------------------------------------------------------
-def find_column(df, pattern):
-    for col in df.columns:
-        if pattern.lower() in col.lower():
-            return col
-    return None
-
-def safe_numeric(df, col):
-    if col in df.columns:
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-    else:
-        df[col] = 0
-    return df
-
-# ------------------------------------------------------------
-# 4. SHEET SUMMARISERS
-# ------------------------------------------------------------
-def summarize_cck_tablet(df):
-    """Returns: Block, Sold %, Balance %, Balance Units, Value ($)"""
-    df = filter_summary_rows(df, extra_cols=None)  # No extra cols needed
-    total_col = find_column(df, 'total')
-    balance_col = find_column(df, 'balance')
-    value_col = find_column(df, "balance $ '000 (nett)")
-    block_col = df.columns[0]
-
-    if not total_col or not balance_col or not value_col:
-        st.error("CCK-TABLET: Missing required columns.")
-        return pd.DataFrame()
-
-    for col in [total_col, balance_col, value_col]:
-        df = safe_numeric(df, col)
-
-    grouped = df.groupby(block_col).agg({
-        total_col: 'sum',
-        balance_col: 'sum',
-        value_col: 'sum'
-    }).reset_index()
-
-    grouped['Sold %'] = ((grouped[total_col] - grouped[balance_col]) / grouped[total_col] * 100).round(2)
-    grouped['Balance %'] = (grouped[balance_col] / grouped[total_col] * 100).round(2)
-
-    total_units = grouped[total_col].sum()
-    total_balance = grouped[balance_col].sum()
-    total_value = grouped[value_col].sum()
-    total_sold_pct = ((total_units - total_balance) / total_units * 100).round(2)
-    total_balance_pct = (total_balance / total_units * 100).round(2)
-
-    grouped.rename(columns={
-        block_col: 'Block',
-        balance_col: 'Balance Units',
-        value_col: 'Value ($)'
-    }, inplace=True)
-    grouped.drop(columns=[total_col], inplace=True)
-
-    total_row = pd.DataFrame({
-        'Block': ['Total'],
-        'Sold %': [total_sold_pct],
-        'Balance %': [total_balance_pct],
-        'Balance Units': [total_balance],
-        'Value ($)': [total_value]
-    })
-
-    result = pd.concat([grouped, total_row], ignore_index=True)
-    result['Value ($)'] = result['Value ($)'] * 1000
-    return result[['Block', 'Sold %', 'Balance %', 'Balance Units', 'Value ($)']]
-
-def summarize_cck_niche(df):
-    """Wide‑format matrix: categories as columns, metrics as rows."""
-    df = filter_summary_rows(df, extra_cols=None)  # We'll handle LOT TYPE manually
-
-    total_col = find_column(df, 'total')
-    sold_col = find_column(df, 'total sold')
-    balance_col = find_column(df, 'balance')
-    value_col = find_column(df, "balance $ '000 (nett)")
-    lot_type_col = find_column(df, 'lot type')
-
-    if not all([total_col, sold_col, balance_col, value_col, lot_type_col]):
-        st.error("CCK-NICHE: Missing required columns.")
-        return pd.DataFrame()
-
-    for col in [total_col, sold_col, balance_col, value_col]:
-        df = safe_numeric(df, col)
-
-    # Extra filtering on LOT TYPE
-    df = df[df[lot_type_col].notna()]
-    df = df[~df[lot_type_col].astype(str).str.contains(r'\b(total|sub|sum)\b', case=False, na=False, regex=True)]
-    df = df[df[lot_type_col].astype(str).str.strip() != '']
-
-    df['Category'] = df[lot_type_col].apply(categorize_lot_type)
-
-    grouped = df.groupby('Category').agg({
-        total_col: 'sum',
-        sold_col: 'sum',
-        balance_col: 'sum',
-        value_col: 'sum'
-    }).reset_index()
-
-    grouped['Balance %'] = (grouped[balance_col] / grouped[total_col] * 100).round(2)
-    grouped['Sold %'] = (grouped[sold_col] / grouped[total_col] * 100).round(2)
-
-    categories_order = ['Single', 'Double', 'Family', 'Buddha', 'Tower', 'Special']
-    for cat in categories_order:
-        if cat not in grouped['Category'].values:
-            grouped = pd.concat([grouped, pd.DataFrame({
-                'Category': [cat],
-                total_col: [0],
-                sold_col: [0],
-                balance_col: [0],
-                value_col: [0],
-                'Balance %': [0],
-                'Sold %': [0]
-            })], ignore_index=True)
-
-    grouped = grouped[grouped['Category'].isin(categories_order)]
-    grouped['Category'] = pd.Categorical(grouped['Category'], categories=categories_order, ordered=True)
-    grouped = grouped.sort_values('Category').reset_index(drop=True)
-
-    metrics = {
-        'Total': grouped[total_col].values,
-        'Balance': grouped[balance_col].values,
-        'Sold': grouped[sold_col].values,
-        'Balance %': grouped['Balance %'].values,
-        'Sold %': grouped['Sold %'].values,
-        'Value': grouped[value_col].values
-    }
-    metrics['Value'] = metrics['Value'] * 1000
-
-    result_df = pd.DataFrame(metrics, index=categories_order).T
-    result_df.columns = categories_order
-    row_order = ['Total', 'Balance', 'Sold', 'Balance %', 'Sold %', 'Value']
-    result_df = result_df.reindex(row_order)
-    return result_df
-
-def summarize_lst(df):
-    """Group by SUITE NO. for Tablet and Niche separately."""
-    # Apply filtering on first column, and also on SUITE NO. and LOT TYPE
-    df = filter_summary_rows(df, extra_cols=['SUITE NO.', 'LOT TYPE'])
-    product_col = df.columns[0]
-    total_col = find_column(df, 'total')
-    sold_col = find_column(df, 'total sold')
-    balance_col = find_column(df, 'balance')
-    value_col = find_column(df, "balance $ '000 (nett)")
-    suite_col = find_column(df, 'suite no.')
-
-    if not all([total_col, sold_col, balance_col, value_col, suite_col]):
-        st.error("LST: Missing required columns.")
-        return {}
-
-    for col in [total_col, sold_col, balance_col, value_col]:
-        df = safe_numeric(df, col)
-
-    tablet_df = df[df[product_col].str.upper() == 'TABLET'].copy()
-    niche_df = df[df[product_col].str.upper() == 'NICHE'].copy()
-
-    def build_product_summary(sub_df, group_col, group_name):
-        if sub_df.empty:
-            return pd.DataFrame()
-        grouped = sub_df.groupby(group_col).agg({
-            total_col: 'sum',
-            sold_col: 'sum',
-            balance_col: 'sum',
-            value_col: 'sum'
-        }).reset_index()
-        grouped['Balance %'] = (grouped[balance_col] / grouped[total_col] * 100).round(2)
-        grouped['Sold %'] = (grouped[sold_col] / grouped[total_col] * 100).round(2)
-        grouped.rename(columns={
-            group_col: group_name,
-            total_col: 'Total',
-            sold_col: 'Sold',
-            balance_col: 'Balance',
-            value_col: 'Value ($)'
-        }, inplace=True)
-        total_row = grouped[['Total', 'Sold', 'Balance', 'Value ($)']].sum()
-        total_row[group_name] = 'Total'
-        total_row['Balance %'] = (total_row['Balance'] / total_row['Total'] * 100).round(2)
-        total_row['Sold %'] = (total_row['Sold'] / total_row['Total'] * 100).round(2)
-        grouped = pd.concat([grouped, pd.DataFrame([total_row])], ignore_index=True)
-        grouped['Value ($)'] = grouped['Value ($)'] * 1000
-        return grouped[[group_name, 'Total', 'Balance', 'Sold', 'Balance %', 'Sold %', 'Value ($)']]
-
-    result = {}
-    if not tablet_df.empty:
-        result['Tablet'] = build_product_summary(tablet_df, suite_col, 'Suite')
-    if not niche_df.empty:
-        result['Niche'] = build_product_summary(niche_df, suite_col, 'Suite')
-    return result
-
-def summarize_tlt(df):
-    """Tablet: single row; Niche: group by LOT TYPE."""
-    df = filter_summary_rows(df, extra_cols=['SUITE NO.', 'LOT TYPE'])
-    product_col = df.columns[0]
-    total_col = find_column(df, 'total')
-    sold_col = find_column(df, 'total sold')
-    balance_col = find_column(df, 'balance')
-    value_col = find_column(df, "balance $ '000 (nett)")
-    lot_type_col = find_column(df, 'lot type')
-
-    if not all([total_col, sold_col, balance_col, value_col]):
-        st.error("TLT: Missing required columns.")
-        return {}
-
-    for col in [total_col, sold_col, balance_col, value_col]:
-        df = safe_numeric(df, col)
-
-    tablet_df = df[df[product_col].str.upper() == 'TABLET'].copy()
-    niche_df = df[df[product_col].str.upper() == 'NICHE'].copy()
-
-    def build_tablet_summary(sub_df):
-        if sub_df.empty:
-            return pd.DataFrame()
-        agg = sub_df[[total_col, sold_col, balance_col, value_col]].sum()
-        agg['Product'] = 'Tablet'
-        agg['Balance %'] = (agg[balance_col] / agg[total_col] * 100).round(2)
-        agg['Sold %'] = (agg[sold_col] / agg[total_col] * 100).round(2)
-        df_out = pd.DataFrame([agg])
-        df_out.rename(columns={
-            total_col: 'Total',
-            sold_col: 'Sold',
-            balance_col: 'Balance',
-            value_col: 'Value ($)'
-        }, inplace=True)
-        df_out['Value ($)'] = df_out['Value ($)'] * 1000
-        return df_out[['Product', 'Total', 'Balance', 'Sold', 'Balance %', 'Sold %', 'Value ($)']]
-
-    def build_niche_summary(sub_df):
-        if sub_df.empty:
-            return pd.DataFrame()
-        grouped = sub_df.groupby(lot_type_col).agg({
-            total_col: 'sum',
-            sold_col: 'sum',
-            balance_col: 'sum',
-            value_col: 'sum'
-        }).reset_index()
-        grouped['Balance %'] = (grouped[balance_col] / grouped[total_col] * 100).round(2)
-        grouped['Sold %'] = (grouped[sold_col] / grouped[total_col] * 100).round(2)
-        grouped.rename(columns={
-            lot_type_col: 'Lot Type',
-            total_col: 'Total',
-            sold_col: 'Sold',
-            balance_col: 'Balance',
-            value_col: 'Value ($)'
-        }, inplace=True)
-        total_row = grouped[['Total', 'Sold', 'Balance', 'Value ($)']].sum()
-        total_row['Lot Type'] = 'Total'
-        total_row['Balance %'] = (total_row['Balance'] / total_row['Total'] * 100).round(2)
-        total_row['Sold %'] = (total_row['Sold'] / total_row['Total'] * 100).round(2)
-        grouped = pd.concat([grouped, pd.DataFrame([total_row])], ignore_index=True)
-        grouped['Value ($)'] = grouped['Value ($)'] * 1000
-        return grouped[['Lot Type', 'Total', 'Balance', 'Sold', 'Balance %', 'Sold %', 'Value ($)']]
-
-    result = {}
-    if not tablet_df.empty:
-        result['Tablet'] = build_tablet_summary(tablet_df)
-    if not niche_df.empty:
-        result['Niche'] = build_niche_summary(niche_df)
-    return result
-
-# ------------------------------------------------------------
-# 5. VISUALISATION HELPERS
-# ------------------------------------------------------------
-def plot_balance_units(data, x_col, y_col, title):
-    chart = alt.Chart(data).mark_bar(color='#2b83ba').encode(
-        x=alt.X(x_col, sort=None),
-        y=alt.Y(y_col, title='Balance Units'),
-        tooltip=[x_col, y_col]
-    ).properties(
-        title=title,
-        height=300
-    )
-    return chart
-
-def show_metric_cards(df, prefix):
-    if df.empty:
-        return
-    cols = st.columns(4)
-    total_row = df[df['Block'] == 'Total'] if 'Block' in df.columns else None
-    if total_row is not None and not total_row.empty:
-        total = total_row.iloc[0]
-        total_units = total['Balance Units'] + (total['Balance Units'] / (total['Balance %']/100) - total['Balance Units'])
-        cols[0].metric(f"{prefix} Total Units", f"{total_units:,.0f}")
-        cols[1].metric(f"{prefix} Balance Units", f"{total['Balance Units']:,.0f}")
-        cols[2].metric(f"{prefix} Sold %", f"{total['Sold %']:.2f}%")
-        cols[3].metric(f"{prefix} Balance Value", f"${total['Value ($)']:,.2f}")
-
-# ------------------------------------------------------------
-# 6. STREAMLIT APP
-# ------------------------------------------------------------
-st.set_page_config(page_title="Branch Inventory Dashboard", layout="wide")
-st.title("🏢 Branch Inventory Dashboard")
-st.markdown("Upload the monthly inventory report to see a clean summary and visual insights.")
-
-uploaded_file = st.file_uploader("📂 Upload Excel Inventory Report", type=["xlsx"])
-
-if uploaded_file is not None:
-    xls = pd.ExcelFile(uploaded_file)
-    sheet_names = xls.sheet_names
-
-    st.sidebar.header("📋 Sheets")
-    selected_sheets = st.sidebar.multiselect("Select sheets to display", sheet_names, default=sheet_names)
-
-    debug = st.sidebar.checkbox("🔍 Debug: show rows classified as 'Single' (CCK-NICHE)")
-
-    for sheet in selected_sheets:
-        st.markdown(f"## 📄 {sheet}")
-        df = pd.read_excel(xls, sheet_name=sheet, header=0)
-
-        if sheet.upper().startswith("CCK-TABLET"):
-            summary = summarize_cck_tablet(df)
-            if not summary.empty:
-                show_metric_cards(summary, "Tablet")
-                st.dataframe(
-                    summary.style.format({
-                        'Sold %': '{:.2f}%',
-                        'Balance %': '{:.2f}%',
-                        'Balance Units': '{:,.0f}',
-                        'Value ($)': '${:,.2f}'
-                    }),
-                    use_container_width=True
-                )
-                chart_df = summary[summary['Block'] != 'Total']
-                if not chart_df.empty:
-                    chart = plot_balance_units(chart_df, 'Block', 'Balance Units', 'Balance Units by Block')
-                    st.altair_chart(chart, use_container_width=True)
-            else:
-                st.warning("No data after filtering.")
-
-        elif sheet.upper().startswith("CCK-NICHE"):
-            summary = summarize_cck_niche(df)
-            if not summary.empty:
-                total_units = summary.loc['Total'].sum()
-                total_balance = summary.loc['Balance'].sum()
-                total_sold = summary.loc['Sold'].sum()
-                total_value = summary.loc['Value'].sum()
-                cols = st.columns(4)
-                cols[0].metric("Total Units", f"{total_units:,.0f}")
-                cols[1].metric("Balance Units", f"{total_balance:,.0f}")
-                cols[2].metric("Sold %", f"{(total_sold/total_units*100):.2f}%")
-                cols[3].metric("Total Balance Value", f"${total_value:,.2f}")
-
-                fmt = {}
-                for col in summary.columns:
-                    if summary[col].dtype in ['int64', 'float64']:
-                        if ' %' in col:
-                            fmt[col] = '{:.2f}%'
-                        elif col == 'Value':
-                            fmt[col] = '${:,.2f}'
-                        else:
-                            fmt[col] = '{:,.0f}'
-                st.dataframe(summary.style.format(fmt), use_container_width=True)
-
-                chart_data = summary.loc[['Balance']].T.reset_index()
-                chart_data.columns = ['Category', 'Balance']
-                chart_data = chart_data[chart_data['Category'] != 'Total']
-                if not chart_data.empty:
-                    chart = plot_balance_units(chart_data, 'Category', 'Balance', 'Balance Units by Category')
-                    st.altair_chart(chart, use_container_width=True)
-            else:
-                st.warning("No data after filtering.")
-
-            if debug and 'CCK-NICHE' in sheet:
-                df_debug = pd.read_excel(xls, sheet_name='CCK-NICHE', header=0)
-                df_debug = filter_summary_rows(df_debug)
-                lot_col = find_column(df_debug, 'lot type')
-                if lot_col:
-                    df_debug = df_debug[df_debug[lot_col].notna()]
-                    df_debug = df_debug[~df_debug[lot_col].astype(str).str.contains(r'\b(total|sub|sum)\b', case=False, na=False, regex=True)]
-                    df_debug = df_debug[df_debug[lot_col].astype(str).str.strip() != '']
-                    df_debug['Category'] = df_debug[lot_col].apply(categorize_lot_type)
-                    single_rows = df_debug[df_debug['Category'] == 'Single']
-                    st.subheader("🔎 Rows classified as 'Single'")
-                    st.dataframe(single_rows)
-
-        elif sheet.upper().startswith("LST"):
-            summaries = summarize_lst(df)
-            if summaries:
-                for prod, sub_df in summaries.items():
-                    st.markdown(f"### {prod}")
-                    if not sub_df.empty:
-                        st.dataframe(
-                            sub_df.style.format({
-                                'Total': '{:,.0f}',
-                                'Balance': '{:,.0f}',
-                                'Sold': '{:,.0f}',
-                                'Balance %': '{:.2f}%',
-                                'Sold %': '{:.2f}%',
-                                'Value ($)': '${:,.2f}'
-                            }),
-                            use_container_width=True
-                        )
-                    else:
-                        st.info(f"No {prod} data.")
-            else:
-                st.warning("No data after filtering.")
-
-        elif sheet.upper().startswith("TLT"):
-            summaries = summarize_tlt(df)
-            if summaries:
-                for prod, sub_df in summaries.items():
-                    st.markdown(f"### {prod}")
-                    if not sub_df.empty:
-                        st.dataframe(
-                            sub_df.style.format({
-                                'Total': '{:,.0f}',
-                                'Balance': '{:,.0f}',
-                                'Sold': '{:,.0f}',
-                                'Balance %': '{:.2f}%',
-                                'Sold %': '{:.2f}%',
-                                'Value ($)': '${:,.2f}'
-                            }),
-                            use_container_width=True
-                        )
-                    else:
-                        st.info(f"No {prod} data.")
-            else:
-                st.warning("No data after filtering.")
-
+    # 3. Official Agency Mapping reflecting individual breakdown requirements
+    def classify_agency_official(row):
+        cbdd_name_col = 'CBDD_NAME' if 'CBDD_NAME' in row.index else ('CBDD' if 'CBDD' in row.index else '')
+        cbdd_val = str(row[cbdd_name_col]).strip().upper() if cbdd_name_col and pd.notna(row[cbdd_name_col]) else ""
+        bdd_name = str(row['BDD_NAME']).strip().upper() if pd.notna(row['BDD_NAME']) else ""
+        
+        if "C117" in cbdd_val or "FU GUI" in cbdd_val:
+            return "Fu Gui Services"
+        elif "C728" in cbdd_val or "APG ADVISORY" in cbdd_val:
+            return "APG Advisory"
+        elif "C918" in cbdd_val or "ZENBOX" in cbdd_val:
+            return "Zenbox"
+        elif "JF LIFE" in bdd_name:
+            return "JF Life"
+        elif "SINGAPORE LIFESTYLE" in bdd_name or "SLA" in bdd_name:
+            return "Singapore Lifestyle Associates"
+        elif "DIRECT" in cbdd_val:
+            return "Direct BDD"
         else:
-            st.info(f"Sheet '{sheet}' is not recognised; displaying raw data (first 5 rows).")
-            st.dataframe(df.head())
+            return "Others"
 
+    # 4. Product Consolidation Logic
+    def map_product(prod):
+        p = str(prod).strip().upper() if pd.notna(prod) else "UNKNOWN"
+        if p in ['P', 'F']: return 'FSP'
+        elif p == 'UN': return 'Urn'
+        elif p in ['URN', 'LOT']: return 'Lot'
+        elif p == 'B': return 'Buddha'
+        elif p == 'TABLET': return 'Tablet'
+        else: return p.title()
+
+    df_confirm['Agency_Class'] = df_confirm.apply(classify_agency_official, axis=1)
+    df_confirm['Product_Class'] = df_confirm['PRODUCT_CODE'].apply(map_product)
+
+    # --- HELPER FUNCTIONS FOR CALCULATIONS ---
+    def get_agency_matrix(data_frame):
+        if data_frame.empty:
+            return pd.DataFrame()
+        pivot = data_frame.pivot_table(
+            index=['Agency_Class', 'BRANCH'], 
+            columns='Product_Class', 
+            values=target_value_col, 
+            aggfunc='sum', 
+            fill_value=0
+        )
+        for c in ['FSP', 'Buddha', 'Tablet', 'Urn', 'Lot']:
+            if c not in pivot.columns:
+                pivot[c] = 0.0
+        product_cols = ['FSP', 'Buddha', 'Tablet', 'Urn', 'Lot']
+        other_cols = [c for c in pivot.columns if c not in product_cols]
+        pivot = pivot[product_cols + other_cols]
+        pivot['Total Sales'] = pivot.sum(axis=1)
+        
+        pivot_display = pivot.copy().reset_index()
+        total_row = pivot.sum(numeric_only=True)
+        new_total_line = {'Agency_Class': 'GRAND TOTAL', 'BRANCH': ''}
+        for col in pivot.columns:
+            new_total_line[col] = total_row[col]
+            
+        pivot_display = pd.concat([pivot_display, pd.DataFrame([new_total_line])], ignore_index=True)
+        return pivot_display
+
+    def get_product_summary(data_frame):
+        if data_frame.empty:
+            return pd.DataFrame()
+        product_summary = data_frame.groupby('Product_Class')[target_value_col].sum().reset_index()
+        product_summary.columns = ['Product Type', 'Total Sales']
+        
+        fsp_val = product_summary.loc[product_summary['Product Type'] == 'FSP', 'Total Sales'].sum()
+        non_fsp_total_val = product_summary[product_summary['Product Type'] != 'FSP']['Total Sales'].sum()
+        grand_total_val = fsp_val + non_fsp_total_val
+        
+        summary_rows = []
+        for _, row in product_summary.sort_values(by='Total Sales', ascending=False).iterrows():
+            summary_rows.append({'Product Type': row['Product Type'], 'Total Sales': row['Total Sales']})
+            
+        summary_rows.append({'Product Type': 'Non-FSP Total', 'Total Sales': non_fsp_total_val})
+        summary_rows.append({'Product Type': 'Grand Total', 'Total Sales': grand_total_val})
+        return pd.DataFrame(summary_rows).set_index('Product Type')
+
+    # --- DYNAMIC MULTI-MONTH PDF GENERATION ENGINE ---
+    def generate_consolidated_pdf(base_df, selected_months):
+        pdf = FPDF()
+        color_palette = px.colors.qualitative.Safe
+        
+        for current_month in selected_months:
+            month_df = base_df[base_df['Report_Month'] == current_month]
+            if month_df.empty:
+                continue
+                
+            def add_matrix_page(title_text, branch_filter):
+                pdf.add_page()
+                pdf.set_font("Helvetica", "B", 14)
+                pdf.cell(0, 10, f"{current_month.upper()} - {title_text}", ln=True, align="C")
+                pdf.ln(3)
+                
+                sub_df = month_df.copy()
+                if branch_filter != 'ALL':
+                    sub_df = sub_df[sub_df['BRANCH'] == branch_filter]
+                    
+                matrix_df = get_agency_matrix(sub_df)
+                if matrix_df.empty: return
+                
+                # Table Headers
+                pdf.set_font("Helvetica", "B", 8)
+                pdf.cell(40, 8, "Agency Class", border=1)
+                pdf.cell(12, 8, "Branch", border=1)
+                pdf.cell(23, 8, "FSP", border=1)
+                pdf.cell(23, 8, "Buddha", border=1)
+                pdf.cell(23, 8, "Tablet", border=1)
+                pdf.cell(23, 8, "Urn", border=1)
+                pdf.cell(23, 8, "Lot", border=1)
+                pdf.cell(25, 8, "Total Sales", border=1, ln=True)
+                
+                # Table Body
+                pdf.set_font("Helvetica", "", 8)
+                for _, r in matrix_df.iterrows():
+                    if r['Agency_Class'] == 'GRAND TOTAL':
+                        pdf.set_font("Helvetica", "B", 8)
+                    pdf.cell(40, 7, str(r['Agency_Class']), border=1)
+                    pdf.cell(12, 7, str(r['BRANCH']), border=1)
+                    pdf.cell(23, 7, f"${r['FSP']:,.2f}", border=1)
+                    pdf.cell(23, 7, f"${r['Buddha']:,.2f}", border=1)
+                    pdf.cell(23, 7, f"${r['Tablet']:,.2f}", border=1)
+                    pdf.cell(23, 7, f"${r['Urn']:,.2f}", border=1)
+                    pdf.cell(23, 7, f"${r['Lot']:,.2f}", border=1)
+                    pdf.cell(25, 7, f"${r['Total Sales']:,.2f}", border=1, ln=True)
+                
+                # Generate Bar Chart image bytes
+                chart_df = sub_df.groupby(['Agency_Class', 'Product_Class'])[target_value_col].sum().reset_index()
+                fig = px.bar(
+                    chart_df, x="Agency_Class", y=target_value_col, color="Product_Class", 
+                    barmode="stack", template="plotly_white", color_discrete_sequence=color_palette
+                )
+                fig.update_layout(width=700, height=300, margin=dict(t=15, b=15, l=15, r=15))
+                
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmpfile:
+                    pio.write_image(fig, tmpfile.name, format="png")
+                    pdf.ln(5)
+                    pdf.image(tmpfile.name, x=10, w=190)
+                os.unlink(tmpfile.name)
+                    
+            def add_summary_page(title_text, branch_filter):
+                pdf.add_page()
+                pdf.set_font("Helvetica", "B", 14)
+                pdf.cell(0, 10, f"{current_month.upper()} - {title_text}", ln=True, align="C")
+                pdf.ln(5)
+                
+                sub_df = month_df.copy()
+                if branch_filter != 'ALL':
+                    sub_df = sub_df[sub_df['BRANCH'] == branch_filter]
+                    
+                summary_df = get_product_summary(sub_df).reset_index()
+                if summary_df.empty: return
+                
+                # Table Headers
+                pdf.set_font("Helvetica", "B", 11)
+                pdf.cell(90, 8, "Product Type", border=1)
+                pdf.cell(60, 8, "Total Sales", border=1, ln=True)
+                
+                # Table Body
+                pdf.set_font("Helvetica", "", 11)
+                for _, r in summary_df.iterrows():
+                    p_type = r['Product Type']
+                    if p_type in ['Non-FSP Total', 'Grand Total']:
+                        pdf.set_font("Helvetica", "B", 11)
+                    pdf.cell(90, 8, str(p_type), border=1)
+                    pdf.cell(60, 8, f"${r['Total Sales']:,.2f}", border=1, ln=True)
+
+                # Generate Donut Chart image bytes
+                product_summary_chart = sub_df.groupby('Product_Class')[target_value_col].sum().reset_index()
+                product_summary_chart.columns = ['Product Type', 'Total Sales']
+                fig = px.pie(
+                    product_summary_chart, values='Total Sales', names='Product Type', 
+                    hole=0.4, template="plotly_white", color_discrete_sequence=color_palette
+                )
+                fig.update_layout(width=500, height=300, margin=dict(t=15, b=15, l=15, r=15))
+                
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmpfile:
+                    pio.write_image(fig, tmpfile.name, format="png")
+                    pdf.ln(5)
+                    pdf.image(tmpfile.name, x=45, w=120)
+                os.unlink(tmpfile.name)
+            
+            # Append pages sequentially per month
+            add_matrix_page("Agency Performance Matrix (CCK Branch)", "CCK")
+            add_summary_page("Product Performance Summary (CCK Branch)", "CCK")
+            add_matrix_page("Agency Performance Matrix (LST Branch)", "LST")
+            add_summary_page("Product Performance Summary (LST Branch)", "LST")
+            add_matrix_page("Agency Performance Matrix (Both Branches)", "ALL")
+            add_summary_page("Product Performance Summary (Both Branches)", "ALL")
+            
+        return pdf.output()
+
+    # --- GLOBAL WORKSPACE NAVIGATION CONTROL ---
+    st.sidebar.header("Global Filters")
+    
+    available_months = sorted(list(df_confirm['Report_Month'].unique()))
+    month_toggle = st.sidebar.multiselect("📅 Select Month(s) to View:", options=available_months, default=available_months)
+    
+    branch_toggle = st.sidebar.selectbox("📍 Select Branch View:", options=['ALL', 'CCK', 'LST'])
+
+    available_agencies = ["Fu Gui Services", "APG Advisory", "Zenbox", "Singapore Lifestyle Associates", "JF Life", "Direct BDD", "Others"]
+    agency_toggle = st.sidebar.multiselect("🏢 Select Agencies:", options=available_agencies, default=available_agencies)
+
+    # Apply interactive cross filters based on selection maps
+    filtered_df = df_confirm.copy()
+    filtered_df = filtered_df[filtered_df['Report_Month'].isin(month_toggle)]
+    if branch_toggle != 'ALL':
+        filtered_df = filtered_df[filtered_df['BRANCH'] == branch_toggle]
+    filtered_df = filtered_df[filtered_df['Agency_Class'].isin(agency_toggle)]
+
+    # --- RENDER ANALYSIS VIEWS ---
+    if not filtered_df.empty:
+        if target_value_col in filtered_df.columns:
+            total_sales = filtered_df[target_value_col].sum()
+            
+            # Overview Performance Rows
+            top_col1, top_col2 = st.columns([3, 1])
+            with top_col1:
+                st.metric(label=f"Total Aggregated Sales ({branch_toggle} View)", value=f"${total_sales:,.2f}")
+            with top_col2:
+                st.write(" ")
+                with st.spinner("Compiling Comprehensive PDF..."):
+                    consolidated_pdf_bytes = generate_consolidated_pdf(df_confirm, month_toggle)
+                st.download_button(
+                    label="📥 Download Consolidated Multi-Month PDF",
+                    data=bytes(consolidated_pdf_bytes),
+                    file_name="Consolidated_Confirm_Sales_Report.pdf",
+                    mime="application/pdf"
+                )
+                
+            # Workspace Presentation Layer Tabs
+            tab1, tab2 = st.tabs(["🏢 Agency Performance Workspace", "📦 Product Performance Summary"])
+            
+            with tab1:
+                st.subheader("📋 Agency Performance Breakdown by Product Type")
+                pivot_display = get_agency_matrix(filtered_df)
+                
+                if not pivot_display.empty:
+                    pivot_display = pivot_display.set_index(['Agency_Class', 'BRANCH'])
+                    
+                    multi_columns = []
+                    for col in pivot_display.columns:
+                        if col == 'FSP':
+                            multi_columns.append(('FSP', ''))
+                        elif col in ['Buddha', 'Tablet', 'Urn', 'Lot']:
+                            multi_columns.append(('Non - FSP', col))
+                        elif col == 'Total Sales':
+                            multi_columns.append(('Total Sales', '')) 
+                        else:
+                            multi_columns.append(('Other', col))
+                            
+                    pivot_display.columns = pd.MultiIndex.from_tuples(multi_columns)
+                    
+                    col1, col2 = st.columns([4, 3])
+                    with col1:
+                        st.dataframe(pivot_display.style.format("${:,.2f}"), width="stretch")
+                    with col2:
+                        chart_df = filtered_df.groupby(['Report_Month', 'Agency_Class', 'Product_Class'])[target_value_col].sum().reset_index()
+                        
+                        # Fluid Axis Configuration
+                        x_axis_var = "Agency_Class" if len(month_toggle) <= 1 else "Report_Month"
+                        facet_var = None if len(month_toggle) <= 1 else "Agency_Class"
+                        
+                        fig_bar = px.bar(
+                            chart_df, x=x_axis_var, y=target_value_col, color="Product_Class",
+                            facet_col=facet_var, facet_col_wrap=2,
+                            title="Month-on-Month Revenue Mix", 
+                            labels={target_value_col: "Sales ($)", "Agency_Class": "Agency", "Report_Month": "Month"},
+                            barmode="stack", template="plotly_white"
+                        )
+                        fig_bar.update_layout(height=380, margin=dict(t=30, b=10, l=10, r=10))
+                        st.plotly_chart(fig_bar, width="stretch")
+                    
+            with tab2:
+                st.subheader("📦 Total Performance by Product Type Only")
+                final_summary_df = get_product_summary(filtered_df)
+                
+                if not final_summary_df.empty:
+                    col3, col4 = st.columns([3, 2])
+                    with col3:
+                        st.dataframe(
+                            final_summary_df.style.format("${:,.2f}")
+                            .set_properties(**{'font-weight': 'bold'}, subset=pd.IndexSlice[['Non-FSP Total', 'Grand Total'], :]),
+                            width="stretch"
+                        )
+                    with col4:
+                        product_summary_chart = filtered_df.groupby('Product_Class')[target_value_col].sum().reset_index()
+                        product_summary_chart.columns = ['Product Type', 'Total Sales']
+                        fig_donut = px.pie(
+                            product_summary_chart, values='Total Sales', names='Product Type', 
+                            hole=0.4, title="Product Category Share", template="plotly_white"
+                        )
+                        fig_donut.update_layout(height=300, margin=dict(t=30, b=10, l=10, r=10))
+                        st.plotly_chart(fig_donut, width="stretch")
+        else:
+            st.error(f"⚠️ Target sales values column header not identified in the uploaded schema.")
+    else:
+        st.warning("No records found matching your selected configuration criteria.")
 else:
-    st.info("⬆️ Please upload an Excel file to start the analysis.")
+    st.info("💡 Welcome! Please upload your monthly 'Closed Sales Report' Excel files above to begin analysis.")
