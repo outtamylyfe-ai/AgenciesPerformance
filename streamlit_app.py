@@ -1,244 +1,1023 @@
-import streamlit as st
-import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sales by Product Type</title>
 
-st.set_page_config(page_title="Sales Dashboard", layout="wide")
+    <!-- Plotly & SheetJS for charts & Excel -->
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js">
+    </script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js">
+    </script>
 
-st.title("📊 Sales Dashboard - Confirmed Sales Analysis")
-st.markdown("Upload an Excel file containing sales data to view dashboard.")
-
-# Custom colour mapping for agencies
-agency_colours = {
-    "FGY": "#808080",   # grey
-    "ZB": "#800080",    # purple
-    "APG": "#000080",   # navy
-    "SLA": "#FF0000",   # red
-    "JFL": "#00FFFF",   # cyan
-}
-
-# Product type colours
-product_colours = {
-    "FSP": "#1f77b4",
-    "Pedestal": "#ff7f0e",
-    "Niche": "#2ca02c",
-    "Others": "#d62728",
-}
-
-# Helper to format numbers for charts (e.g. 15.77m)
-def format_big_number(value):
-    if abs(value) >= 1e6:
-        return f"{value/1e6:.2f}m"
-    elif abs(value) >= 1e3:
-        return f"{value/1e3:.2f}k"
-    else:
-        return f"{value:.2f}"
-
-uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx", "xls"])
-
-if uploaded_file is not None:
-    try:
-        # ---- Read file and locate header ----
-        df_raw = pd.read_excel(uploaded_file, header=None)
-        header_row_idx = None
-        for idx, row in df_raw.iterrows():
-            if row.astype(str).str.contains("FILE_NO").any():
-                header_row_idx = idx
-                break
-
-        if header_row_idx is None:
-            st.error("Could not find header row containing 'FILE_NO'. Please check the file format.")
-            st.stop()
-
-        df = pd.read_excel(uploaded_file, header=header_row_idx)
-        df.columns = df.columns.str.strip()
-
-        required_cols = ["STATUS", "NETMAINPRODUCT", "CBDD_NAME", "BDD_NAME", "PRODUCT_CODE"]
-        missing = [col for col in required_cols if col not in df.columns]
-        if missing:
-            st.error(f"Missing columns: {missing}. Please check the file format.")
-            st.stop()
-
-        df["NETMAINPRODUCT"] = pd.to_numeric(df["NETMAINPRODUCT"], errors="coerce")
-        df_confirmed = df[df["STATUS"].str.upper() == "CONFIRM"].copy()
-        df_confirmed = df_confirmed[df_confirmed["NETMAINPRODUCT"].notna() & (df_confirmed["NETMAINPRODUCT"] != 0)]
-
-        if df_confirmed.empty:
-            st.warning("No sales (NETMAINPRODUCT > 0) found in confirmed rows.")
-            st.stop()
-
-        # ---- Agency mapping ----
-        agency_rename = {
-            "FU GUI SERVICES": "FGY",
-            "ZENBOX PTE LTD": "ZB",
-            "APG ADVISORY PTE. LTD.": "APG",
-            "SINGAPORE LIFESTYLE ASSOCIATES PTE LTD.": "SLA",
-            "JF LIFE CONSULTANT PTE LTD": "JFL",
+    <style>
+        * {
+            box-sizing: border-box;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 0;
         }
 
-        def get_agency(row):
-            cbd = row.get("CBDD_NAME", "")
-            if pd.notna(cbd) and str(cbd).strip() != "":
-                raw = str(cbd).strip().upper()
-            else:
-                bdd = row.get("BDD_NAME", "")
-                if pd.notna(bdd) and str(bdd).strip() != "":
-                    raw = str(bdd).strip().upper()
-                else:
-                    return "Others"
-            for key, value in agency_rename.items():
-                if key in raw:
-                    return value
-            return raw
+        body {
+            background: #f6f8fc;
+            padding: 2rem 1.5rem;
+            color: #1e293b;
+        }
 
-        df_confirmed["Agency"] = df_confirmed.apply(get_agency, axis=1)
+        .app-container {
+            max-width: 1300px;
+            margin: 0 auto;
+        }
 
-        # ---- Product type ----
-        def get_product_type(code):
-            if pd.isna(code):
-                return "Others"
-            code_str = str(code).strip().upper()
-            if code_str == "P":
-                return "FSP"
-            elif code_str == "TABLET":
-                return "Pedestal"
-            elif code_str == "URN":
-                return "Niche"
-            else:
-                return "Others"
+        /* Header */
+        .app-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
 
-        df_confirmed["Product_Type"] = df_confirmed["PRODUCT_CODE"].apply(get_product_type)
+        .app-header h1 {
+            font-size: 2rem;
+            font-weight: 600;
+            background: linear-gradient(135deg, #0f2b4b, #1e4a7a);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            letter-spacing: -0.5px;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
 
-        total_sales = df_confirmed["NETMAINPRODUCT"].sum()
+        .app-header h1 small {
+            font-size: 1rem;
+            font-weight: 400;
+            -webkit-text-fill-color: #64748b;
+            background: none;
+            color: #64748b;
+        }
 
-        # ---- Agency sales ----
-        agency_sales = df_confirmed.groupby("Agency")["NETMAINPRODUCT"].sum().reset_index()
-        custom_order = ["FGY", "ZB", "APG", "SLA", "JFL"]
-        agency_sales["Order"] = agency_sales["Agency"].apply(
-            lambda x: custom_order.index(x) if x in custom_order else 999
-        )
-        agency_sales = agency_sales.sort_values(["Order", "Agency"]).drop("Order", axis=1)
+        .branch-badge {
+            display: flex;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+        }
 
-        # Create formatted text column for chart
-        agency_sales["Display"] = agency_sales["NETMAINPRODUCT"].apply(format_big_number)
+        .branch-badge span {
+            padding: 0.3rem 1rem;
+            border-radius: 100px;
+            font-size: 0.8rem;
+            font-weight: 500;
+            background: #e9edf4;
+            color: #334155;
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
 
-        # ---- Product sales ----
-        product_sales = df_confirmed.groupby("Product_Type")["NETMAINPRODUCT"].sum().reset_index()
-        product_sales = product_sales.sort_values("NETMAINPRODUCT", ascending=False)
-        product_sales["Display"] = product_sales["NETMAINPRODUCT"].apply(format_big_number)
+        .branch-badge .status-dot {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #94a3b8;
+        }
 
-        # ---- Agency-Product pivot ----
-        agency_product = df_confirmed.groupby(["Agency", "Product_Type"])["NETMAINPRODUCT"].sum().reset_index()
-        pivot = agency_product.pivot(index="Agency", columns="Product_Type", values="NETMAINPRODUCT").fillna(0)
-        pivot = pivot.reindex(agency_sales["Agency"])
+        .branch-badge .status-dot.loaded {
+            background: #22c55e;
+        }
 
-        # ---- Metrics ----
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Total Confirmed Sales", f"${total_sales:,.2f}")
-        with col2:
-            st.metric("Number of Agencies", len(agency_sales))
-        with col3:
-            st.metric("Number of Product Types", len(product_sales))
+        /* Upload Cards */
+        .upload-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
 
-        # ---- Chart: Sales by Agency ----
-        st.subheader("Sales by Agency")
-        fig_agency = px.bar(
-            agency_sales,
-            x="Agency",
-            y="NETMAINPRODUCT",
-            title="Sales by Agency",
-            labels={"NETMAINPRODUCT": "Sales ($)", "Agency": "Agency"},
-            text="Display",   # show formatted text on bars
-            color="Agency",
-            color_discrete_map=agency_colours,
-            category_orders={"Agency": agency_sales["Agency"].tolist()}
-        )
-        fig_agency.update_traces(textposition="outside")
-        fig_agency.update_layout(xaxis_tickangle=-45)
-        st.plotly_chart(fig_agency, use_container_width=True)
+        .upload-card {
+            background: white;
+            border-radius: 16px;
+            padding: 1.25rem 1.25rem 1.5rem;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04), 0 1px 3px rgba(0, 0, 0, 0.06);
+            border: 1px solid #eef2f6;
+            transition: border 0.2s, box-shadow 0.2s;
+        }
 
-        with st.expander("View data table for Sales by Agency"):
-            # Format with $ and commas
-            styled_agency = agency_sales[["Agency", "NETMAINPRODUCT"]].style.format(
-                {"NETMAINPRODUCT": "${:,.2f}"}
-            )
-            st.dataframe(styled_agency, use_container_width=True)
+        .upload-card:hover {
+            border-color: #cbd5e1;
+            box-shadow: 0 6px 16px rgba(0, 0, 0, 0.06);
+        }
 
-        # ---- Charts: Product Mix & Agency Breakdown ----
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("Sales by Product Type")
-            fig_product = px.pie(
-                product_sales,
-                names="Product_Type",
-                values="NETMAINPRODUCT",
-                title="Product Mix",
-                hole=0.3,
-                color="Product_Type",
-                color_discrete_map=product_colours,
-                hover_data={"Display": True}
-            )
-            fig_product.update_traces(
-                textinfo="label+percent",
-                hovertemplate="<b>%{label}</b><br>Sales: %{customdata[0]}<br>Percentage: %{percent}<extra></extra>",
-                customdata=product_sales[["Display"]].values
-            )
-            st.plotly_chart(fig_product, use_container_width=True)
+        .upload-card .branch-label {
+            font-weight: 600;
+            font-size: 0.95rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 0.5rem;
+        }
 
-            with st.expander("View data table for Product Mix"):
-                styled_product = product_sales[["Product_Type", "NETMAINPRODUCT"]].style.format(
-                    {"NETMAINPRODUCT": "${:,.2f}"}
-                )
-                st.dataframe(styled_product, use_container_width=True)
+        .upload-card .branch-label .color-swatch {
+            width: 14px;
+            height: 14px;
+            border-radius: 4px;
+        }
 
-        with col2:
-            st.subheader("Agency Breakdown by Product")
-            pivot_reset = pivot.reset_index().melt(id_vars="Agency", var_name="Product_Type", value_name="Sales")
-            # Add formatted display column for hover
-            pivot_reset["Display"] = pivot_reset["Sales"].apply(format_big_number)
+        .upload-card .file-input-wrap {
+            position: relative;
+            margin-top: 0.5rem;
+        }
 
-            fig_stack = px.bar(
-                pivot_reset,
-                x="Agency",
-                y="Sales",
-                color="Product_Type",
-                title="Agency Product Breakdown",
-                labels={"Sales": "Sales ($)", "Agency": "Agency"},
-                barmode="stack",
-                color_discrete_map=product_colours,
-                category_orders={"Agency": agency_sales["Agency"].tolist()},
-                text="Display"
-            )
-            fig_stack.update_traces(textposition="inside")
-            fig_stack.update_layout(xaxis_tickangle=-45)
-            st.plotly_chart(fig_stack, use_container_width=True)
+        .upload-card input[type="file"] {
+            display: block;
+            width: 100%;
+            padding: 0.6rem 0.4rem;
+            font-size: 0.8rem;
+            border: 1px dashed #cbd5e1;
+            border-radius: 10px;
+            background: #fafcff;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
 
-            with st.expander("View data table for Agency Product Breakdown"):
-                # Show pivot with formatted numbers
-                pivot_display = pivot.copy()
-                for col in pivot_display.columns:
-                    pivot_display[col] = pivot_display[col].apply(lambda x: f"${x:,.2f}")
-                st.dataframe(pivot_display, use_container_width=True)
+        .upload-card input[type="file"]:hover {
+            background: #f1f5f9;
+        }
 
-        # ---- Raw Data ----
-        with st.expander("Show Raw Data (Confirmed Sales)"):
-            st.dataframe(
-                df_confirmed[["FILE_NO", "ENTITY_NAME", "Agency", "Product_Type", "NETMAINPRODUCT", "CBDD_NAME", "BDD_NAME"]],
-                use_container_width=True
-            )
+        .upload-card .file-status {
+            font-size: 0.75rem;
+            margin-top: 0.5rem;
+            color: #475569;
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
 
-        # ---- Download processed data ----
-        csv = df_confirmed.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="Download processed data as CSV",
-            data=csv,
-            file_name="confirmed_sales.csv",
-            mime="text/csv"
-        )
+        .upload-card .file-status .ok {
+            color: #16a34a;
+            font-weight: 500;
+        }
 
-    except Exception as e:
-        st.error(f"An error occurred: {e}")
+        .upload-card .file-status .err {
+            color: #dc2626;
+        }
 
+        /* Toggle / Controls */
+        .controls-bar {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 1rem 1.5rem;
+            background: white;
+            border-radius: 16px;
+            padding: 0.9rem 1.5rem;
+            margin-bottom: 1.5rem;
+            border: 1px solid #eef2f6;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.02);
+        }
+
+        .controls-bar .label {
+            font-weight: 500;
+            font-size: 0.9rem;
+            color: #475569;
+        }
+
+        .branch-toggle-group {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.4rem;
+        }
+
+        .branch-toggle-group button {
+            padding: 0.4rem 1.2rem;
+            border-radius: 100px;
+            border: 1px solid #e2e8f0;
+            background: white;
+            font-size: 0.85rem;
+            font-weight: 500;
+            color: #475569;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .branch-toggle-group button:hover {
+            background: #f1f5f9;
+            border-color: #94a3b8;
+        }
+
+        .branch-toggle-group button.active {
+            background: #1e4a7a;
+            color: white;
+            border-color: #1e4a7a;
+        }
+
+        .branch-toggle-group button:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+            pointer-events: none;
+        }
+
+        .branch-toggle-group button.consolidated-btn {
+            border-color: #8b5cf6;
+            color: #7c3aed;
+        }
+
+        .branch-toggle-group button.consolidated-btn.active {
+            background: #7c3aed;
+            color: white;
+            border-color: #7c3aed;
+        }
+
+        /* Chart & table area */
+        .chart-section {
+            background: white;
+            border-radius: 16px;
+            padding: 1.5rem 1.5rem 1rem;
+            border: 1px solid #eef2f6;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.03);
+            margin-bottom: 1.5rem;
+        }
+
+        .chart-section .section-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 0.75rem;
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            flex-wrap: wrap;
+        }
+
+        .chart-section .section-title .sub {
+            font-weight: 400;
+            font-size: 0.9rem;
+            color: #64748b;
+        }
+
+        #chart-container {
+            width: 100%;
+            height: 460px;
+        }
+
+        .table-section {
+            background: white;
+            border-radius: 16px;
+            padding: 1.25rem 1.5rem 1.5rem;
+            border: 1px solid #eef2f6;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.03);
+        }
+
+        .table-section .table-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .table-section .table-header h3 {
+            font-size: 1rem;
+            font-weight: 600;
+        }
+
+        .table-section .table-header .row-count {
+            font-size: 0.8rem;
+            color: #64748b;
+            background: #f1f5f9;
+            padding: 0.2rem 0.8rem;
+            border-radius: 100px;
+        }
+
+        .table-wrap {
+            overflow-x: auto;
+            max-height: 320px;
+            overflow-y: auto;
+            border-radius: 12px;
+            border: 1px solid #eef2f6;
+        }
+
+        .table-wrap table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.85rem;
+        }
+
+        .table-wrap th {
+            background: #f8fafc;
+            color: #1e293b;
+            font-weight: 600;
+            padding: 0.6rem 1rem;
+            text-align: left;
+            border-bottom: 2px solid #e2e8f0;
+            position: sticky;
+            top: 0;
+            z-index: 2;
+            background: #f8fafc;
+        }
+
+        .table-wrap td {
+            padding: 0.5rem 1rem;
+            border-bottom: 1px solid #f1f5f9;
+            color: #1e293b;
+        }
+
+        .table-wrap tr:hover td {
+            background: #fafcff;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 3rem 1.5rem;
+            color: #94a3b8;
+        }
+
+        .empty-state .icon {
+            font-size: 2.5rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .empty-state p {
+            font-size: 0.95rem;
+        }
+
+        /* responsive */
+        @media (max-width: 700px) {
+            body {
+                padding: 1rem;
+            }
+            .app-header h1 {
+                font-size: 1.5rem;
+            }
+            .upload-grid {
+                grid-template-columns: 1fr;
+            }
+            .controls-bar {
+                flex-direction: column;
+                align-items: stretch;
+                gap: 0.6rem;
+            }
+            .branch-toggle-group {
+                justify-content: center;
+            }
+            #chart-container {
+                height: 300px;
+            }
+        }
+
+        /* toast / small notification */
+        .toast {
+            position: fixed;
+            bottom: 1.5rem;
+            right: 1.5rem;
+            background: #0f2b4b;
+            color: white;
+            padding: 0.7rem 1.5rem;
+            border-radius: 100px;
+            font-size: 0.85rem;
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
+            transform: translateY(120px);
+            opacity: 0;
+            transition: transform 0.3s ease, opacity 0.3s ease;
+            pointer-events: none;
+            z-index: 999;
+        }
+
+        .toast.show {
+            transform: translateY(0);
+            opacity: 1;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="app-container" id="app">
+        <!-- Header -->
+        <div class="app-header">
+            <h1>
+                📊 Sales by Product Type
+                <small>branch insights</small>
+            </h1>
+            <div class="branch-badge" id="branchBadges">
+                <span><span class="status-dot" data-branch="CCK"></span> CCK</span>
+                <span><span class="status-dot" data-branch="LST"></span> LST</span>
+                <span><span class="status-dot" data-branch="TLT"></span> TLT</span>
+            </div>
+        </div>
+
+        <!-- Upload Cards -->
+        <div class="upload-grid" id="uploadGrid">
+            <!-- CCK -->
+            <div class="upload-card" data-branch="CCK">
+                <div class="branch-label">
+                    <span class="color-swatch" style="background:#1f77b4;"></span>
+                    CCK Branch
+                </div>
+                <div class="file-input-wrap">
+                    <input type="file" accept=".csv,.xlsx,.xls" data-branch="CCK" />
+                </div>
+                <div class="file-status" data-status="CCK">
+                    <span>📄 No file uploaded</span>
+                </div>
+            </div>
+            <!-- LST -->
+            <div class="upload-card" data-branch="LST">
+                <div class="branch-label">
+                    <span class="color-swatch" style="background:#ff7f0e;"></span>
+                    LST Branch
+                </div>
+                <div class="file-input-wrap">
+                    <input type="file" accept=".csv,.xlsx,.xls" data-branch="LST" />
+                </div>
+                <div class="file-status" data-status="LST">
+                    <span>📄 No file uploaded</span>
+                </div>
+            </div>
+            <!-- TLT -->
+            <div class="upload-card" data-branch="TLT">
+                <div class="branch-label">
+                    <span class="color-swatch" style="background:#2ca02c;"></span>
+                    TLT Branch
+                </div>
+                <div class="file-input-wrap">
+                    <input type="file" accept=".csv,.xlsx,.xls" data-branch="TLT" />
+                </div>
+                <div class="file-status" data-status="TLT">
+                    <span>📄 No file uploaded</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Controls -->
+        <div class="controls-bar" id="controlsBar">
+            <span class="label">📌 View:</span>
+            <div class="branch-toggle-group" id="toggleGroup">
+                <button data-view="CCK" class="active" disabled>CCK</button>
+                <button data-view="LST" disabled>LST</button>
+                <button data-view="TLT" disabled>TLT</button>
+                <button data-view="consolidated" class="consolidated-btn" disabled>🔗 Consolidated</button>
+            </div>
+            <span style="margin-left:auto;font-size:0.8rem;color:#94a3b8;" id="viewHint">Upload at least one file</span>
+        </div>
+
+        <!-- Chart -->
+        <div class="chart-section">
+            <div class="section-title">
+                <span id="chartTitle">Sales by Product Type</span>
+                <span class="sub" id="chartSub">— no data loaded</span>
+            </div>
+            <div id="chart-container">
+                <div class="empty-state">
+                    <div class="icon">📂</div>
+                    <p>Upload a CSV or Excel file for any branch to see sales breakdown.</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Table -->
+        <div class="table-section">
+            <div class="table-header">
+                <h3>📋 Data Preview</h3>
+                <span class="row-count" id="rowCount">0 rows</span>
+            </div>
+            <div class="table-wrap" id="tableWrap">
+                <div class="empty-state" style="padding:1.5rem;">
+                    <p style="font-size:0.9rem;">No data to display</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast -->
+    <div class="toast" id="toast"></div>
+
+    <script>
+        (function() {
+            'use strict';
+
+            // ---- STATE ----
+            const state = {
+                data: {
+                    CCK: null, // { df: array, cols: [], productCol: '', salesCol: '' }
+                    LST: null,
+                    TLT: null
+                },
+                loaded: {
+                    CCK: false,
+                    LST: false,
+                    TLT: false
+                },
+                activeView: 'CCK', // 'CCK' | 'LST' | 'TLT' | 'consolidated'
+            };
+
+            // ---- DOM refs ----
+            const fileInputs = document.querySelectorAll('input[type="file"]');
+            const statusEls = document.querySelectorAll('[data-status]');
+            const toggleBtns = document.querySelectorAll('[data-view]');
+            const chartContainer = document.getElementById('chart-container');
+            const tableWrap = document.getElementById('tableWrap');
+            const chartTitle = document.getElementById('chartTitle');
+            const chartSub = document.getElementById('chartSub');
+            const rowCount = document.getElementById('rowCount');
+            const viewHint = document.getElementById('viewHint');
+            const toastEl = document.getElementById('toast');
+            const branchBadgeDots = document.querySelectorAll('.status-dot');
+
+            const BRANCH_COLORS = {
+                CCK: '#1f77b4',
+                LST: '#ff7f0e',
+                TLT: '#2ca02c'
+            };
+            const BRANCH_LABELS = {
+                CCK: 'CCK',
+                LST: 'LST',
+                TLT: 'TLT'
+            };
+
+            // ---- helpers ----
+            function showToast(msg, duration = 2500) {
+                toastEl.textContent = msg;
+                toastEl.classList.add('show');
+                clearTimeout(toastEl._timer);
+                toastEl._timer = setTimeout(() => {
+                    toastEl.classList.remove('show');
+                }, duration);
+            }
+
+            function updateBadges() {
+                branchBadgeDots.forEach(dot => {
+                    const branch = dot.dataset.branch;
+                    if (state.loaded[branch]) {
+                        dot.classList.add('loaded');
+                    } else {
+                        dot.classList.remove('loaded');
+                    }
+                });
+            }
+
+            function updateStatusUI() {
+                statusEls.forEach(el => {
+                    const branch = el.dataset.status;
+                    if (state.loaded[branch]) {
+                        const rows = state.data[branch]?.df?.length || 0;
+                        el.innerHTML = `<span class="ok">✅ ${rows} rows loaded</span>`;
+                    } else {
+                        el.innerHTML = `<span>📄 No file uploaded</span>`;
+                    }
+                });
+                // toggle buttons
+                const loadedBranches = Object.keys(state.loaded).filter(b => state.loaded[b]);
+                toggleBtns.forEach(btn => {
+                    const view = btn.dataset.view;
+                    if (view === 'consolidated') {
+                        btn.disabled = loadedBranches.length < 2;
+                    } else {
+                        btn.disabled = !state.loaded[view];
+                    }
+                });
+                // active
+                toggleBtns.forEach(btn => {
+                    btn.classList.toggle('active', btn.dataset.view === state.activeView);
+                });
+
+                // hint
+                const count = loadedBranches.length;
+                if (count === 0) {
+                    viewHint.textContent = 'Upload at least one file';
+                } else if (count === 1) {
+                    viewHint.textContent = `1 branch loaded — upload more for consolidated view`;
+                } else {
+                    viewHint.textContent = `${count} branches loaded — toggle consolidated view`;
+                }
+
+                updateBadges();
+            }
+
+            // ---- parse file ----
+            function parseFile(file) {
+                return new Promise((resolve, reject) => {
+                    const ext = file.name.split('.').pop().toLowerCase();
+                    if (ext === 'csv') {
+                        const reader = new FileReader();
+                        reader.onload = (e) => {
+                            try {
+                                const text = e.target.result;
+                                const lines = text.split(/\r?\n/).filter(line => line.trim());
+                                if (lines.length === 0) reject(new Error('Empty file'));
+                                const header = lines[0].split(',').map(s => s.trim());
+                                const rows = [];
+                                for (let i = 1; i < lines.length; i++) {
+                                    const vals = lines[i].split(',').map(s => s.trim());
+                                    if (vals.length === header.length) {
+                                        const obj = {};
+                                        header.forEach((h, idx) => { obj[h] = vals[idx] || ''; });
+                                        rows.push(obj);
+                                    }
+                                }
+                                resolve({ headers: header, rows });
+                            } catch (err) {
+                                reject(err);
+                            }
+                        };
+                        reader.onerror = () => reject(new Error('Failed to read CSV'));
+                        reader.readAsText(file);
+                    } else if (ext === 'xlsx' || ext === 'xls') {
+                        const reader = new FileReader();
+                        reader.onload = (e) => {
+                            try {
+                                const data = new Uint8Array(e.target.result);
+                                const workbook = XLSX.read(data, { type: 'array' });
+                                const sheet = workbook.Sheets[workbook.SheetNames[0]];
+                                const json = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+                                if (!json || json.length === 0) reject(new Error('Empty sheet'));
+                                const headers = Object.keys(json[0]);
+                                resolve({ headers, rows: json });
+                            } catch (err) {
+                                reject(err);
+                            }
+                        };
+                        reader.onerror = () => reject(new Error('Failed to read Excel'));
+                        reader.readAsArrayBuffer(file);
+                    } else {
+                        reject(new Error('Unsupported file type. Use .csv, .xlsx, or .xls'));
+                    }
+                });
+            }
+
+            // ---- find product & sales columns ----
+            function findColumns(headers) {
+                // user said: "dont use netmainproduct, use sales"
+                // so we look for 'sales' column preferentially, and for product type
+                let productCol = null;
+                let salesCol = null;
+
+                // find product: look for 'product', 'type', 'category' (case insensitive)
+                const productCandidates = headers.filter(h =>
+                    /product|type|category|item|sku/i.test(h) &&
+                    !/sales|revenue|amount|price|cost/i.test(h)
+                );
+                if (productCandidates.length > 0) {
+                    productCol = productCandidates[0];
+                } else {
+                    // fallback: first column
+                    productCol = headers[0];
+                }
+
+                // find sales: look for 'sales' first, then 'revenue', 'amount'
+                const salesCandidates = headers.filter(h =>
+                    /sales|revenue|amount|net/i.test(h) &&
+                    !/product|type|category|item|sku/i.test(h)
+                );
+                // Specifically prefer 'sales' column
+                const exactSales = headers.find(h => h.toLowerCase() === 'sales');
+                if (exactSales) {
+                    salesCol = exactSales;
+                } else if (salesCandidates.length > 0) {
+                    salesCol = salesCandidates[0];
+                } else {
+                    // fallback: second column or first numeric-looking
+                    salesCol = headers.length > 1 ? headers[1] : headers[0];
+                }
+
+                return { productCol, salesCol };
+            }
+
+            // ---- process uploaded data ----
+            function processData(branch, file) {
+                return parseFile(file).then(({ headers, rows }) => {
+                    const { productCol, salesCol } = findColumns(headers);
+                    // convert sales to number
+                    const df = rows.map(row => {
+                        const newRow = { ...row };
+                        const val = parseFloat(row[salesCol]);
+                        newRow[salesCol] = isNaN(val) ? 0 : val;
+                        return newRow;
+                    });
+                    state.data[branch] = {
+                        df,
+                        headers,
+                        productCol,
+                        salesCol,
+                        rawHeaders: headers,
+                    };
+                    state.loaded[branch] = true;
+                    return { df, productCol, salesCol };
+                });
+            }
+
+            // ---- build chart ----
+            function buildChart() {
+                const view = state.activeView;
+                let df = null;
+                let productCol = null;
+                let salesCol = null;
+                let branchLabel = null;
+                let isConsolidated = false;
+
+                if (view === 'consolidated') {
+                    // combine all loaded branches
+                    const loadedBranches = Object.keys(state.loaded).filter(b => state.loaded[b]);
+                    if (loadedBranches.length < 2) {
+                        showToast('Need at least 2 branches for consolidated view', 2000);
+                        return;
+                    }
+                    isConsolidated = true;
+                    const allRows = [];
+                    let commonProductCol = null;
+                    let commonSalesCol = null;
+                    loadedBranches.forEach(b => {
+                        const d = state.data[b];
+                        if (!d) return;
+                        if (!commonProductCol) commonProductCol = d.productCol;
+                        if (!commonSalesCol) commonSalesCol = d.salesCol;
+                        const rows = d.df.map(row => ({
+                            ...row,
+                            _branch: b,
+                            [commonProductCol]: row[d.productCol] || '',
+                            [commonSalesCol]: parseFloat(row[d.salesCol]) || 0,
+                        }));
+                        allRows.push(...rows);
+                    });
+                    if (allRows.length === 0) return;
+                    df = allRows;
+                    productCol = commonProductCol || 'Product';
+                    salesCol = commonSalesCol || 'Sales';
+                    branchLabel = 'All Branches (Consolidated)';
+                } else {
+                    const d = state.data[view];
+                    if (!d) return;
+                    df = d.df;
+                    productCol = d.productCol;
+                    salesCol = d.salesCol;
+                    branchLabel = `${view} Branch`;
+                }
+
+                if (!df || df.length === 0) {
+                    chartContainer.innerHTML = `<div class="empty-state"><div class="icon">📭</div><p>No data for this view</p></div>`;
+                    tableWrap.innerHTML = `<div class="empty-state" style="padding:1.5rem;"><p style="font-size:0.9rem;">No data to display</p></div>`;
+                    rowCount.textContent = '0 rows';
+                    chartTitle.textContent = 'Sales by Product Type';
+                    chartSub.textContent = `— ${branchLabel}`;
+                    return;
+                }
+
+                // aggregate by product
+                const aggMap = new Map();
+                if (isConsolidated) {
+                    // group by product + branch
+                    df.forEach(row => {
+                        const prod = String(row[productCol] || 'Unknown').trim();
+                        const branch = row._branch || 'Unknown';
+                        const sales = parseFloat(row[salesCol]) || 0;
+                        const key = prod + '|' + branch;
+                        if (!aggMap.has(key)) {
+                            aggMap.set(key, { product: prod, branch, sales: 0 });
+                        }
+                        aggMap.get(key).sales += sales;
+                    });
+                    const agg = Array.from(aggMap.values());
+                    // sort by product
+                    agg.sort((a, b) => a.product.localeCompare(b.product));
+
+                    // build chart with grouped bars
+                    const products = [...new Set(agg.map(d => d.product))];
+                    const branches = [...new Set(agg.map(d => d.branch))];
+                    const traces = branches.map(branch => {
+                        const vals = products.map(p => {
+                            const found = agg.find(d => d.product === p && d.branch === branch);
+                            return found ? found.sales : 0;
+                        });
+                        return {
+                            x: products,
+                            y: vals,
+                            name: branch,
+                            type: 'bar',
+                            marker: { color: BRANCH_COLORS[branch] || '#888' },
+                        };
+                    });
+
+                    const layout = {
+                        barmode: 'group',
+                        title: {
+                            text: `Sales by Product Type — Consolidated (${branches.join(' + ')})`,
+                            font: { size: 16 }
+                        },
+                        xaxis: { title: productCol, automargin: true },
+                        yaxis: { title: 'Sales', automargin: true },
+                        margin: { l: 60, r: 20, t: 60, b: 60 },
+                        legend: { orientation: 'h', y: 1.05 },
+                        hovermode: 'closest',
+                    };
+                    Plotly.newPlot(chartContainer, traces, layout, { responsive: true });
+
+                    // table data
+                    const tableRows = agg.map(d => ({ ...d }));
+                    renderTable(tableRows, ['product', 'branch', 'sales']);
+
+                    chartTitle.textContent = 'Sales by Product Type';
+                    chartSub.textContent = `— Consolidated (${branches.join(' + ')}) · ${agg.length} product groups`;
+                    rowCount.textContent = `${tableRows.length} rows`;
+                    return;
+                }
+
+                // single branch aggregation
+                const agg = new Map();
+                df.forEach(row => {
+                    const prod = String(row[productCol] || 'Unknown').trim();
+                    const sales = parseFloat(row[salesCol]) || 0;
+                    if (!agg.has(prod)) agg.set(prod, 0);
+                    agg.set(prod, agg.get(prod) + sales);
+                });
+                const sorted = Array.from(agg.entries())
+                    .sort((a, b) => a[0].localeCompare(b[0]));
+                const products = sorted.map(d => d[0]);
+                const values = sorted.map(d => d[1]);
+
+                const trace = {
+                    x: products,
+                    y: values,
+                    type: 'bar',
+                    marker: {
+                        color: products.map(() => BRANCH_COLORS[view] || '#1f77b4'),
+                        line: { width: 0.5, color: '#fff' }
+                    },
+                    text: values.map(v => v.toLocaleString()),
+                    textposition: 'outside',
+                    hovertemplate: '%{x}<br>Sales: %{y:,.0f}<extra></extra>',
+                };
+
+                const layout = {
+                    title: {
+                        text: `Sales by Product Type — ${view} Branch`,
+                        font: { size: 16 }
+                    },
+                    xaxis: { title: productCol, automargin: true },
+                    yaxis: { title: 'Sales', automargin: true },
+                    margin: { l: 60, r: 20, t: 60, b: 60 },
+                    hovermode: 'closest',
+                };
+                Plotly.newPlot(chartContainer, [trace], layout, { responsive: true });
+
+                // table
+                const tableRows = sorted.map(([prod, sales]) => ({ [productCol]: prod, [salesCol]: sales }));
+                renderTable(tableRows, [productCol, salesCol]);
+
+                chartTitle.textContent = 'Sales by Product Type';
+                chartSub.textContent = `— ${view} Branch · ${sorted.length} product types`;
+                rowCount.textContent = `${tableRows.length} rows`;
+            }
+
+            // ---- render table ----
+            function renderTable(rows, cols) {
+                if (!rows || rows.length === 0) {
+                    tableWrap.innerHTML = `<div class="empty-state" style="padding:1.5rem;"><p style="font-size:0.9rem;">No data</p></div>`;
+                    return;
+                }
+                const displayCols = cols || Object.keys(rows[0]);
+                let html = `<table><thead><tr>`;
+                displayCols.forEach(col => {
+                    const label = col === '_branch' ? 'Branch' : col;
+                    html += `<th>${label}</th>`;
+                });
+                html += `</tr></thead><tbody>`;
+                rows.forEach(row => {
+                    html += `<tr>`;
+                    displayCols.forEach(col => {
+                        let val = row[col] !== undefined ? row[col] : '';
+                        if (typeof val === 'number') {
+                            val = val.toLocaleString();
+                        }
+                        html += `<td>${val}</td>`;
+                    });
+                    html += `</tr>`;
+                });
+                html += `</tbody></table>`;
+                tableWrap.innerHTML = html;
+            }
+
+            // ---- handle file upload ----
+            fileInputs.forEach(input => {
+                input.addEventListener('change', function(e) {
+                    const branch = this.dataset.branch;
+                    const file = this.files?.[0];
+                    if (!file) return;
+
+                    // clear previous
+                    state.loaded[branch] = false;
+                    state.data[branch] = null;
+
+                    processData(branch, file)
+                        .then(({ df, productCol, salesCol }) => {
+                            showToast(`✅ ${branch} loaded: ${df.length} rows`, 2000);
+                            updateStatusUI();
+                            // if no active view, set to this branch
+                            const loaded = Object.keys(state.loaded).filter(b => state.loaded[b]);
+                            if (loaded.length === 1) {
+                                state.activeView = loaded[0];
+                            }
+                            // if active view is not loaded, switch to first loaded
+                            if (!state.loaded[state.activeView] && state.activeView !== 'consolidated') {
+                                const first = Object.keys(state.loaded).find(b => state.loaded[b]);
+                                if (first) state.activeView = first;
+                            }
+                            // if consolidated active but <2 loaded, switch
+                            if (state.activeView === 'consolidated') {
+                                const loadedBranches = Object.keys(state.loaded).filter(b => state.loaded[b]);
+                                if (loadedBranches.length < 2) {
+                                    state.activeView = loadedBranches[0] || 'CCK';
+                                }
+                            }
+                            updateToggleUI();
+                            buildChart();
+                            // re-apply active class
+                            toggleBtns.forEach(btn => {
+                                btn.classList.toggle('active', btn.dataset.view === state.activeView);
+                            });
+                        })
+                        .catch(err => {
+                            showToast(`❌ ${branch} error: ${err.message}`, 3000);
+                            state.loaded[branch] = false;
+                            state.data[branch] = null;
+                            updateStatusUI();
+                            // reset file input
+                            this.value = '';
+                        });
+                });
+            });
+
+            // ---- toggle clicks ----
+            toggleBtns.forEach(btn => {
+                btn.addEventListener('click', function() {
+                    const view = this.dataset.view;
+                    if (this.disabled) return;
+                    if (view === 'consolidated') {
+                        const loaded = Object.keys(state.loaded).filter(b => state.loaded[b]);
+                        if (loaded.length < 2) {
+                            showToast('Need at least 2 branches for consolidated view', 2000);
+                            return;
+                        }
+                    }
+                    state.activeView = view;
+                    updateToggleUI();
+                    buildChart();
+                });
+            });
+
+            function updateToggleUI() {
+                toggleBtns.forEach(btn => {
+                    btn.classList.toggle('active', btn.dataset.view === state.activeView);
+                });
+                // enable/disable consolidated
+                const loaded = Object.keys(state.loaded).filter(b => state.loaded[b]);
+                toggleBtns.forEach(btn => {
+                    if (btn.dataset.view === 'consolidated') {
+                        btn.disabled = loaded.length < 2;
+                    } else {
+                        btn.disabled = !state.loaded[btn.dataset.view];
+                    }
+                });
+                updateStatusUI();
+            }
+
+            // ---- initial render ----
+            updateStatusUI();
+            // no data loaded, show empty chart
+            chartContainer.innerHTML = `<div class="empty-state"><div class="icon">📂</div><p>Upload a CSV or Excel file for any branch to see sales breakdown.</p></div>`;
+            tableWrap.innerHTML = `<div class="empty-state" style="padding:1.5rem;"><p style="font-size:0.9rem;">No data to display</p></div>`;
+            rowCount.textContent = '0 rows';
+            chartTitle.textContent = 'Sales by Product Type';
+            chartSub.textContent = '— no data loaded';
+            // enable CCK button? no, it's disabled until upload
+            toggleBtns.forEach(btn => {
+                btn.disabled = true;
+                btn.classList.remove('active');
+            });
+            // but we keep CCK as active view in state
+            state.activeView = 'CCK';
+
+            // ---- expose for debugging ----
+            window.__state = state;
+
+            // ---- re-build on resize ----
+            let resizeTimer;
+            window.addEventListener('resize', function() {
+                clearTimeout(resizeTimer);
+                resizeTimer = setTimeout(() => {
+                    if (state.activeView && Object.values(state.loaded).some(v => v)) {
+                        buildChart();
+                    }
+                }, 300);
+            });
+
+        })();
+    </script>
+
+</body>
+</html>
 else:
     st.info("Please upload an Excel file to begin.")
