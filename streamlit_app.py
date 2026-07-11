@@ -14,6 +14,9 @@ try:
     st.title("📊 Sales Dashboard - Multi-Branch Analysis")
     st.markdown("Upload Excel files for **CCK**, **LST**, and **TLT** branches to view individual and consolidated insights.")
 
+    # Corporate Hierarchy sequence
+    AGENCY_ORDER = ["FGY", "ZB", "APG", "SLA", "JFL"]
+
     # Color definitions
     agency_colours = {"FGY": "#808080", "ZB": "#800080", "APG": "#000080", "SLA": "#FF0000", "JFL": "#00FFFF"}
     product_colours = {"FSP": "#1f77b4", "Pedestal": "#ff7f0e", "Niche": "#2ca02c", "Others": "#d62728"}
@@ -31,10 +34,25 @@ try:
                 df_display[col] = df_display[col].apply(format_currency)
         return df_display
 
+    # Formats chart text to compact million notation (e.g., $4.98m)
+    def format_chart_label(value):
+        if pd.isna(value) or value == 0:
+            return ""
+        if abs(value) >= 1e6:
+            return f"${value/1e6:.2f}m"
+        elif abs(value) >= 1e3:
+            return f"${value/1e3:.1f}k"
+        return f"${value:.2f}"
+
     def format_pct(value):
         if pd.isna(value):
             return "0.00%"
         return f"{value:,.2f}%"
+
+    # Enforces explicit agency sequence hierarchy on dataframes
+    def sort_by_corporate_hierarchy(df, agency_col="Agency"):
+        df[agency_col] = pd.Categorical(df[agency_col], categories=AGENCY_ORDER, ordered=True)
+        return df.sort_values(agency_col)
 
     # --- Processing Engine ---
     def process_branch_file(uploaded_file, branch_name):
@@ -120,7 +138,9 @@ try:
             
             br_matrix = br_matrix[["FSP", "Pedestal", "Niche", "Others"]].copy()
             br_matrix["Total Sales"] = br_matrix.sum(axis=1)
-            br_matrix = br_matrix.sort_values("Total Sales", ascending=False)
+            
+            # Enforce sequence layout hierarchy in document
+            br_matrix = br_matrix.reindex(AGENCY_ORDER).fillna(0)
             
             br_table_data = [["Agency", "FSP", "Pedestal", "Niche", "Others", "Total Contribution"]]
             for idx, row in br_matrix.iterrows():
@@ -158,7 +178,9 @@ try:
                 overall_matrix[col] = 0.0
         overall_matrix = overall_matrix[["FSP", "Pedestal", "Niche", "Others"]].copy()
         overall_matrix["Total Contribution"] = overall_matrix.sum(axis=1)
-        overall_matrix = overall_matrix.sort_values("Total Contribution", ascending=False)
+        
+        # Enforce corporate hierarchy sequence layout
+        overall_matrix = overall_matrix.reindex(AGENCY_ORDER).fillna(0)
         
         agency_data = [["Agency", "FSP", "Pedestal", "Niche", "Others", "Total Contribution"]]
         for idx, row in overall_matrix.iterrows():
@@ -257,11 +279,16 @@ try:
             # --- OVERALL PERFORMANCE BY AGENCY ---
             st.subheader("Overall Performance by Agency")
             global_agency_prod = total_df.groupby(["Agency", "Product_Type"])["NETMAINPRODUCT"].sum().reset_index()
+            global_agency_prod = sort_by_corporate_hierarchy(global_agency_prod, "Agency")
             
+            # Build chart labels using the compact version requested ($4.98m)
+            chart_text = global_agency_prod["NETMAINPRODUCT"].apply(format_chart_label)
+
             fig_gap = px.bar(global_agency_prod, x="Agency", y="NETMAINPRODUCT", color="Product_Type",
                              title="Consolidated Product Breakdown Across All Agencies", 
                              color_discrete_map=product_colours, barmode="stack", 
-                             text=global_agency_prod["NETMAINPRODUCT"].apply(format_currency))
+                             text=chart_text)
+            fig_gap.update_layout(xaxis={'categoryorder':'array', 'categoryarray': AGENCY_ORDER})
             st.plotly_chart(fig_gap, width="stretch")
             
             global_pivot = total_df.pivot_table(index="Agency", columns="Product_Type", values="NETMAINPRODUCT", aggfunc="sum", fill_value=0)
@@ -271,8 +298,11 @@ try:
             global_pivot = global_pivot[["FSP", "Pedestal", "Niche", "Others"]]
             global_pivot["Total Contribution ($)"] = global_pivot.sum(axis=1)
             
+            # Enforce corporate hierarchy on data table index layout
+            global_pivot = global_pivot.reindex(AGENCY_ORDER).fillna(0)
+            
             st.markdown("**Data Table: Overall Agency Product Mix Matrix**")
-            display_global_pivot = format_currency_df(global_pivot.sort_values("Total Contribution ($)", ascending=False), ["FSP", "Pedestal", "Niche", "Others", "Total Contribution ($)"])
+            display_global_pivot = format_currency_df(global_pivot, ["FSP", "Pedestal", "Niche", "Others", "Total Contribution ($)"])
             st.dataframe(display_global_pivot, width="stretch")
 
             st.write("---")
@@ -312,14 +342,19 @@ try:
                 # Interactive Stacked Bar Chart
                 st.subheader(f"Agency Performance & Product Mix in {b_name}")
                 branch_agency_prod = b_df.groupby(["Agency", "Product_Type"])["NETMAINPRODUCT"].sum().reset_index()
+                branch_agency_prod = sort_by_corporate_hierarchy(branch_agency_prod, "Agency")
                 
+                # Dynamic visual label updates to compact format
+                branch_chart_text = branch_agency_prod["NETMAINPRODUCT"].apply(format_chart_label)
+
                 fig_br_ap = px.bar(branch_agency_prod, x="Agency", y="NETMAINPRODUCT", color="Product_Type",
                                   title=f"{b_name} Branch - Revenue by Placement Channel",
                                   color_discrete_map=product_colours, barmode="stack",
-                                  text=branch_agency_prod["NETMAINPRODUCT"].apply(format_currency))
+                                  text=branch_chart_text)
+                fig_br_ap.update_layout(xaxis={'categoryorder':'array', 'categoryarray': AGENCY_ORDER})
                 st.plotly_chart(fig_br_ap, width="stretch")
 
-                # Copy/Paste Ready Formatted Data Table
+                # Copy/Paste Ready Formatted Data Table (Long-form numbers preserved)
                 st.markdown(f"**Data Table: {b_name} Agency Performance Matrix**")
                 branch_pivot = b_df.pivot_table(index="Agency", columns="Product_Type", values="NETMAINPRODUCT", aggfunc="sum", fill_value=0)
                 
@@ -330,7 +365,9 @@ try:
                 branch_pivot = branch_pivot[["FSP", "Pedestal", "Niche", "Others"]]
                 branch_pivot["Total Sales ($)"] = branch_pivot.sum(axis=1)
                 branch_pivot["Branch Contribution %"] = (branch_pivot["Total Sales ($)"] / b_total) * 100
-                branch_pivot = branch_pivot.sort_values("Total Sales ($)", ascending=False)
+                
+                # Order row index structure explicitly by sequence hierarchy
+                branch_pivot = branch_pivot.reindex(AGENCY_ORDER).fillna(0)
                 
                 display_branch_pivot = format_currency_df(branch_pivot, ["FSP", "Pedestal", "Niche", "Others", "Total Sales ($)"])
                 display_branch_pivot["Branch Contribution %"] = display_branch_pivot["Branch Contribution %"].apply(format_pct)
@@ -338,8 +375,9 @@ try:
                 st.dataframe(display_branch_pivot, width="stretch")
                 
                 st.write("---")
-                st.markdown("**Raw Local Datatable Extract**")
+                st.markdown("**Raw Branch Ledger Records**")
                 display_raw = b_df[["FILE_NO", "Agency", "Product_Type", "NETMAINPRODUCT"]].copy()
+                display_raw = sort_by_corporate_hierarchy(display_raw, "Agency")
                 display_raw = format_currency_df(display_raw, ["NETMAINPRODUCT"])
                 st.dataframe(display_raw, width="stretch", hide_index=True)
 
