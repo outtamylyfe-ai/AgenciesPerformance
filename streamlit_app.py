@@ -249,6 +249,3 @@ try:
 except Exception as e:
     # Catch any unexpected error at the top level
     st.error(f"An unexpected error occurred:\n\n{e}\n\n{traceback.format_exc()}")
-
-else:
-    st.info("Please upload an Excel file to begin.")
