@@ -6,9 +6,9 @@ import traceback
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
 from reportlab.graphics.shapes import Drawing, String
-from reportlab.graphics.charts.barcharts import VerticalBarChart  # <-- Fixed import here
-from reportlab.graphics.charts.legends import Legend
+from reportlab.graphics.charts.barcharts import VerticalBarChart
 from reportlab.graphics.charts.legends import Legend
 
 try:
@@ -53,49 +53,37 @@ try:
 
     # --- Processing Engine ---
     def process_branch_file(uploaded_file, branch_name):
-       # --- Native ReportLab Vector Drawing Generator ---
-    def generate_pdf_chart(pivot_df):
-        # Prepare 2D matrix array matching AGENCY_ORDER x PRODUCT_ORDER
-        chart_data = []
-        for p_type in PRODUCT_ORDER:
-            row_series = []
-            for agency in AGENCY_ORDER:
-                val = pivot_df.loc[agency, p_type] if agency in pivot_df.index else 0.0
-                row_series.append(val)
-            chart_data.append(row_series)
+        df_raw = pd.read_excel(uploaded_file, header=None)
+        header_row_idx = None
+        for idx, row in df_raw.iterrows():
+            if row.astype(str).str.contains("FILE_NO").any():
+                header_row_idx = idx
+                break
+        if header_row_idx is None: return None
 
-        d = Drawing(450, 180)
-        chart = VerticalBarChart() # <-- Instantiated as standard VerticalBarChart
-        chart.x = 40
-        chart.y = 25
-        chart.height = 130
-        chart.width = 380
-        chart.data = chart_data
-        
-        # Enable stacked layout configuration safely 
-        chart.categoryAxis.style = 'stacked' # <-- This property handles the stacking!
-        
-        chart.categoryAxis.categoryNames = AGENCY_ORDER
-        chart.categoryAxis.labels.fontSize = 9
-        chart.valueAxis.valueMin = 0
-        chart.valueAxis.labels.fontSize = 8
+        df = pd.read_excel(uploaded_file, header=header_row_idx)
+        df.columns = df.columns.str.strip()
 
-        # Map programmatic corporate color assignments
-        for idx, color_obj in enumerate(rl_colors):
-            chart.bars[idx].fillColor = color_obj
+        required_cols = ["STATUS", "NETMAINPRODUCT", "CBDD_NAME", "BDD_NAME", "PRODUCT_CODE"]
+        if any(col not in df.columns for col in required_cols): return None
 
-        # Legend Configuration
-        legend = Legend()
-        legend.x = 350
-        legend.y = 150
-        legend.alignment = 'right'
-        legend.fontName = 'Helvetica'
-        legend.fontSize = 8
-        legend.colorNamePairs = list(zip(rl_colors, PRODUCT_ORDER))
+        df["NETMAINPRODUCT"] = pd.to_numeric(df["NETMAINPRODUCT"], errors="coerce")
+        df_confirmed = df[df["STATUS"].str.upper() == "CONFIRM"].copy()
+        df_confirmed = df_confirmed[df_confirmed["NETMAINPRODUCT"].notna() & (df_confirmed["NETMAINPRODUCT"] != 0)]
         
-        d.add(chart)
-        d.add(legend)
-        return d
+        if df_confirmed.empty: return pd.DataFrame()
+
+        agency_rename = {
+            "FU GUI SERVICES": "FGY", "ZENBOX PTE LTD": "ZB",
+            "APG ADVISORY PTE. LTD.": "APG", "SINGAPORE LIFESTYLE ASSOCIATES PTE LTD.": "SLA",
+            "JF LIFE CONSULTANT PTE LTD": "JFL",
+        }
+
+        def get_agency(row):
+            cbd = row.get("CBDD_NAME", "")
+            if pd.notna(cbd) and str(cbd).strip() != "":
+                raw = str(cbd).strip().upper()
+            else:
                 bdd = row.get("BDD_NAME", "")
                 raw = str(bdd).strip().upper() if pd.notna(bdd) and str(bdd).strip() != "" else "Others"
             for key, value in agency_rename.items():
@@ -128,12 +116,16 @@ try:
             chart_data.append(row_series)
 
         d = Drawing(450, 180)
-        chart = VerticalStackedBarChart()
+        chart = VerticalBarChart()
         chart.x = 40
         chart.y = 25
         chart.height = 130
         chart.width = 380
         chart.data = chart_data
+        
+        # Enable stacked layout configuration safely 
+        chart.categoryAxis.style = 'stacked'
+        
         chart.categoryAxis.categoryNames = AGENCY_ORDER
         chart.categoryAxis.labels.fontSize = 9
         chart.valueAxis.valueMin = 0
@@ -176,7 +168,7 @@ try:
         
         for br_name, df_br in branch_data_dict.items():
             elements.append(Paragraph(f"📍 {br_name} Branch Performance Matrix", h3_style))
-            br_total = df_br["NETMAINPRODUCT"].sum()
+            br_total = df_br["NETMAINPRODUCT'].sum()
             
             br_pivot = df_br.pivot_table(index="Agency", columns="Product_Type", values="NETMAINPRODUCT", aggfunc="sum", fill_value=0)
             for col in PRODUCT_ORDER:
