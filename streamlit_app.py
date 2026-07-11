@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import traceback  # Added for better error reporting
+import traceback
 
 st.set_page_config(page_title="Sales Dashboard", layout="wide")
 
@@ -150,7 +150,7 @@ if uploaded_file is not None:
             y="NETMAINPRODUCT",
             title="Sales by Agency",
             labels={"NETMAINPRODUCT": "Sales ($)", "Agency": "Agency"},
-            text="Display",   # show formatted text on bars
+            text="Display",
             color="Agency",
             color_discrete_map=agency_colours,
             category_orders={"Agency": agency_sales["Agency"].tolist()}
@@ -160,7 +160,6 @@ if uploaded_file is not None:
         st.plotly_chart(fig_agency, use_container_width=True)
 
         with st.expander("View data table for Sales by Agency"):
-            # Format as plain DataFrame (avoid Styler issues)
             agency_table = agency_sales[["Agency", "NETMAINPRODUCT"]].copy()
             agency_table["NETMAINPRODUCT"] = agency_table["NETMAINPRODUCT"].apply(lambda x: f"${x:,.2f}")
             st.dataframe(agency_table, use_container_width=True)
@@ -177,7 +176,7 @@ if uploaded_file is not None:
                 hole=0.3,
                 color="Product_Type",
                 color_discrete_map=product_colours,
-                hover_data={"Display": True}
+                # hover_data removed to avoid internal .append() error
             )
             fig_product.update_traces(
                 textinfo="label+percent",
@@ -194,7 +193,6 @@ if uploaded_file is not None:
         with col2:
             st.subheader("Agency Breakdown by Product")
             pivot_reset = pivot.reset_index().melt(id_vars="Agency", var_name="Product_Type", value_name="Sales")
-            # Add formatted display column for hover
             pivot_reset["Display"] = pivot_reset["Sales"].apply(format_big_number)
 
             fig_stack = px.bar(
@@ -214,7 +212,6 @@ if uploaded_file is not None:
             st.plotly_chart(fig_stack, use_container_width=True)
 
             with st.expander("View data table for Agency Product Breakdown"):
-                # pivot is already numeric, we format as string
                 pivot_display = pivot.copy()
                 for col in pivot_display.columns:
                     pivot_display[col] = pivot_display[col].apply(lambda x: f"${x:,.2f}")
@@ -237,7 +234,6 @@ if uploaded_file is not None:
         )
 
     except Exception as e:
-        # Show full traceback to help debugging
         st.error(f"An error occurred: {e}\n\n{traceback.format_exc()}")
 
 else:
