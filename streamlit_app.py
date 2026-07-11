@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import traceback  # Added for better error reporting
 
 st.set_page_config(page_title="Sales Dashboard", layout="wide")
 
@@ -159,11 +160,10 @@ if uploaded_file is not None:
         st.plotly_chart(fig_agency, use_container_width=True)
 
         with st.expander("View data table for Sales by Agency"):
-            # Format with $ and commas
-            styled_agency = agency_sales[["Agency", "NETMAINPRODUCT"]].style.format(
-                {"NETMAINPRODUCT": "${:,.2f}"}
-            )
-            st.dataframe(styled_agency, use_container_width=True)
+            # Format as plain DataFrame (avoid Styler issues)
+            agency_table = agency_sales[["Agency", "NETMAINPRODUCT"]].copy()
+            agency_table["NETMAINPRODUCT"] = agency_table["NETMAINPRODUCT"].apply(lambda x: f"${x:,.2f}")
+            st.dataframe(agency_table, use_container_width=True)
 
         # ---- Charts: Product Mix & Agency Breakdown ----
         col1, col2 = st.columns(2)
@@ -187,10 +187,9 @@ if uploaded_file is not None:
             st.plotly_chart(fig_product, use_container_width=True)
 
             with st.expander("View data table for Product Mix"):
-                styled_product = product_sales[["Product_Type", "NETMAINPRODUCT"]].style.format(
-                    {"NETMAINPRODUCT": "${:,.2f}"}
-                )
-                st.dataframe(styled_product, use_container_width=True)
+                product_table = product_sales[["Product_Type", "NETMAINPRODUCT"]].copy()
+                product_table["NETMAINPRODUCT"] = product_table["NETMAINPRODUCT"].apply(lambda x: f"${x:,.2f}")
+                st.dataframe(product_table, use_container_width=True)
 
         with col2:
             st.subheader("Agency Breakdown by Product")
@@ -215,7 +214,7 @@ if uploaded_file is not None:
             st.plotly_chart(fig_stack, use_container_width=True)
 
             with st.expander("View data table for Agency Product Breakdown"):
-                # Show pivot with formatted numbers
+                # pivot is already numeric, we format as string
                 pivot_display = pivot.copy()
                 for col in pivot_display.columns:
                     pivot_display[col] = pivot_display[col].apply(lambda x: f"${x:,.2f}")
@@ -238,7 +237,8 @@ if uploaded_file is not None:
         )
 
     except Exception as e:
-        st.error(f"An error occurred: {e}")
+        # Show full traceback to help debugging
+        st.error(f"An error occurred: {e}\n\n{traceback.format_exc()}")
 
 else:
     st.info("Please upload an Excel file to begin.")
