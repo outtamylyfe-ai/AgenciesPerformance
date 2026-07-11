@@ -168,7 +168,7 @@ try:
         
         for br_name, df_br in branch_data_dict.items():
             elements.append(Paragraph(f"📍 {br_name} Branch Performance Matrix", h3_style))
-            br_total = df_br["NETMAINPRODUCT'].sum()
+            br_total = df_br["NETMAINPRODUCT"].sum()  # <-- Typo Fixed Here!
             
             br_pivot = df_br.pivot_table(index="Agency", columns="Product_Type", values="NETMAINPRODUCT", aggfunc="sum", fill_value=0)
             for col in PRODUCT_ORDER:
