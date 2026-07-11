@@ -12,7 +12,7 @@ from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
-from reportlab.graphics.shapes import Drawing, String
+from reportlab.graphics.shapes import Drawing
 from reportlab.graphics.charts.barcharts import VerticalBarChart
 from reportlab.graphics.charts.legends import Legend
 
@@ -111,7 +111,6 @@ try:
 
     # --- Native ReportLab Vector Drawing Generator ---
     def generate_pdf_chart(pivot_df):
-        # Prepare 2D matrix array matching AGENCY_ORDER x PRODUCT_ORDER
         chart_data = []
         for p_type in PRODUCT_ORDER:
             row_series = []
@@ -128,19 +127,15 @@ try:
         chart.width = 380
         chart.data = chart_data
         
-        # Enable stacked layout configuration safely 
         chart.categoryAxis.style = 'stacked'
-        
         chart.categoryAxis.categoryNames = AGENCY_ORDER
         chart.categoryAxis.labels.fontSize = 9
         chart.valueAxis.valueMin = 0
         chart.valueAxis.labels.fontSize = 8
 
-        # Map programmatic corporate color assignments
         for idx, color_obj in enumerate(rl_colors):
             chart.bars[idx].fillColor = color_obj
 
-        # Legend Configuration
         legend = Legend()
         legend.x = 350
         legend.y = 150
@@ -166,9 +161,6 @@ try:
         elements = [Paragraph("Consolidated Corporate Sales & Product Matrix", title_style), Spacer(1, 5)]
         grand_total = total_df['NETMAINPRODUCT'].sum()
 
-        # -------------------------------------------------------------------------
-        # 1. SEGMENTED OPERATIONAL BREAKDOWN BY BRANCH
-        # -------------------------------------------------------------------------
         elements.append(Paragraph("1. Operational Performance Breakdown by Branch", h2_style))
         
         for br_name, df_br in branch_data_dict.items():
@@ -180,7 +172,6 @@ try:
                 if col not in br_pivot.columns: br_pivot[col] = 0.0
             br_pivot = br_pivot[PRODUCT_ORDER].reindex(AGENCY_ORDER).fillna(0)
             
-            # Draw Vector Graphical Chart Element
             elements.append(generate_pdf_chart(br_pivot))
             elements.append(Spacer(1, 10))
 
@@ -208,19 +199,14 @@ try:
             elements.append(t_br)
             elements.append(Spacer(1, 15))
 
-        # -------------------------------------------------------------------------
-        # 2. OVERALL CORPORATE PERFORMANCE
-        # -------------------------------------------------------------------------
         elements.append(Paragraph("2. Overall Corporate Performance Matrix", h2_style))
-        
-        # 2A: OVERALL BY AGENCY
         elements.append(Paragraph("2a. Consolidated Contribution Performance by Corporate Agency Hierarchy", h3_style))
+        
         overall_pivot = total_df.pivot_table(index="Agency", columns="Product_Type", values="NETMAINPRODUCT", aggfunc="sum", fill_value=0)
         for col in PRODUCT_ORDER:
             if col not in overall_pivot.columns: overall_pivot[col] = 0.0
         overall_pivot = overall_pivot[PRODUCT_ORDER].reindex(AGENCY_ORDER).fillna(0)
         
-        # Add Global Corporate Level Stacked Chart Graphic
         elements.append(generate_pdf_chart(overall_pivot))
         elements.append(Spacer(1, 10))
 
@@ -269,9 +255,7 @@ try:
         tab_titles = ["Consolidated Overview"] + [f"{name} Branch" for name in active_branches.keys()]
         tabs = st.tabs(tab_titles)
 
-        # ------------------------------------------------------------
         # TAB 0: CONSOLIDATED OVERVIEW
-        # ------------------------------------------------------------
         with tabs[0]:
             st.header("🏢 Unified Corporate Overview")
             
@@ -291,7 +275,6 @@ try:
             c3.metric("Total Confirmed Transactions", f"{len(total_df):,}")
             st.write("---")
             
-            # --- OVERALL PERFORMANCE BY AGENCY ---
             st.subheader("Overall Performance by Agency")
             global_agency_prod = total_df.groupby(["Agency", "Product_Type"])["NETMAINPRODUCT"].sum().reset_index()
             global_agency_prod = sort_by_corporate_hierarchy(global_agency_prod, "Agency")
@@ -301,7 +284,7 @@ try:
                              color_discrete_map=product_colours, barmode="stack", 
                              text=global_agency_prod["NETMAINPRODUCT"].apply(format_chart_label))
             fig_gap.update_layout(xaxis={'categoryorder':'array', 'categoryarray': AGENCY_ORDER})
-            st.plotly_chart(fig_gap, width="stretch")
+            st.plotly_chart(fig_gap, use_container_width=True)
             
             global_pivot = total_df.pivot_table(index="Agency", columns="Product_Type", values="NETMAINPRODUCT", aggfunc="sum", fill_value=0)
             for p_col in PRODUCT_ORDER:
@@ -315,17 +298,16 @@ try:
             st.markdown("**Data Table: Overall Agency Product Mix Matrix**")
             display_global_pivot = format_currency_df(global_pivot, ["FSP", "Pedestal", "Niche", "Others", "Total Contribution ($)"])
             display_global_pivot["Overall Corporate Contribution %"] = display_global_pivot["Overall Corporate Contribution %"].apply(format_pct)
-            st.dataframe(display_global_pivot, width="stretch")
+            st.dataframe(display_global_pivot, use_container_width=True)
 
             st.write("---")
 
-            # --- OVERALL PERFORMANCE BY PRODUCT MIX ---
             st.subheader("Overall Performance by Product Mix")
             prod_sum = total_df.groupby("Product_Type")["NETMAINPRODUCT"].sum().reset_index()
             
             fig_p = px.pie(prod_sum, names="Product_Type", values="NETMAINPRODUCT", hole=0.3, 
                            title="Global Product Portfolio Split", color="Product_Type", color_discrete_map=product_colours)
-            st.plotly_chart(fig_p, width="stretch")
+            st.plotly_chart(fig_p, use_container_width=True)
             
             st.markdown("**Data Table: Overall Portfolio Contribution**")
             prod_table = prod_sum.rename(columns={"NETMAINPRODUCT": "Total Sales"}).sort_values("Total Sales", ascending=False)
@@ -333,11 +315,9 @@ try:
             
             display_prod_table = format_currency_df(prod_table, ["Total Sales"])
             display_prod_table["Portfolio Share %"] = display_prod_table["Portfolio Share %"].apply(format_pct)
-            st.dataframe(display_prod_table, width="stretch", hide_index=True)
+            st.dataframe(display_prod_table, use_container_width=True, hide_index=True)
 
-        # ------------------------------------------------------------
         # DYNAMIC TABS 1+: INDIVIDUAL SEGMENTED BRANCH PANELS
-        # ------------------------------------------------------------
         for idx, (b_name, b_df) in enumerate(active_branches.items(), start=1):
             with tabs[idx]:
                 st.header(f"📍 Operational Analysis: {b_name} Branch")
@@ -357,7 +337,7 @@ try:
                                   color_discrete_map=product_colours, barmode="stack",
                                   text=branch_agency_prod["NETMAINPRODUCT"].apply(format_chart_label))
                 fig_br_ap.update_layout(xaxis={'categoryorder':'array', 'categoryarray': AGENCY_ORDER})
-                st.plotly_chart(fig_br_ap, width="stretch")
+                st.plotly_chart(fig_br_ap, use_container_width=True)
 
                 st.markdown(f"**Data Table: {b_name} Agency Performance Matrix**")
                 branch_pivot = b_df.pivot_table(index="Agency", columns="Product_Type", values="NETMAINPRODUCT", aggfunc="sum", fill_value=0)
@@ -376,14 +356,14 @@ try:
                 display_branch_pivot["Agency Contribution in Branch %"] = display_branch_pivot["Agency Contribution in Branch %"].apply(format_pct)
                 display_branch_pivot["Agency Branch Contribution in Overall %"] = display_branch_pivot["Agency Branch Contribution in Overall %"].apply(format_pct)
                 
-                st.dataframe(display_branch_pivot, width="stretch")
+                st.dataframe(display_branch_pivot, use_container_width=True)
                 
                 st.write("---")
                 st.markdown("**Raw Branch Ledger Records**")
                 display_raw = b_df[["FILE_NO", "Agency", "Product_Type", "NETMAINPRODUCT"]].copy()
                 display_raw = sort_by_corporate_hierarchy(display_raw, "Agency")
                 display_raw = format_currency_df(display_raw, ["NETMAINPRODUCT"])
-                st.dataframe(display_raw, width="stretch", hide_index=True)
+                st.dataframe(display_raw, use_container_width=True, hide_index=True)
 
     else:
         st.info("👋 Welcome! Please upload at least one valid Branch Excel data sheet via the sidebar layout to initialize the dashboard panels.")
