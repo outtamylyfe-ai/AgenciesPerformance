@@ -174,6 +174,7 @@ try:
             col1, col2 = st.columns(2)
             with col1:
                 st.subheader("Sales by Product Type")
+                # Fixed: removed hover_data to avoid internal .append() error
                 fig_product = px.pie(
                     product_sales,
                     names="Product_Type",
@@ -224,10 +225,8 @@ try:
 
             # ---- Raw Data ----
             with st.expander("Show Raw Data (Confirmed Sales)"):
-                # Ensure FILE_NO is added to required validation check if strictly needed
-                raw_cols = ["Agency", "Product_Type", "NETMAINPRODUCT", "CBDD_NAME", "BDD_NAME"]
-                if "FILE_NO" in df_confirmed.columns:
-                    raw_cols.insert(0, "FILE_NO")
+                # Only include columns that exist
+                raw_cols = ["FILE_NO", "Agency", "Product_Type", "NETMAINPRODUCT", "CBDD_NAME", "BDD_NAME"]
                 if "ENTITY_NAME" in df_confirmed.columns:
                     raw_cols.insert(1, "ENTITY_NAME")
                 st.dataframe(df_confirmed[raw_cols], use_container_width=True)
@@ -248,7 +247,5 @@ try:
         st.info("Please upload an Excel file to begin.")
 
 except Exception as e:
-    st.error(f"An unexpected error occurred:\n\n{e}\n\n{traceback.format_exc()}")
-
-except Exception as e:
+    # Catch any unexpected error at the top level
     st.error(f"An unexpected error occurred:\n\n{e}\n\n{traceback.format_exc()}")
