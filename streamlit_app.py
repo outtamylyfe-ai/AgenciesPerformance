@@ -1,10 +1,11 @@
 import streamlit as st
 
-# Read the HTML file (use the correct file name)
-with open("components.html", "r", encoding="utf-8") as f:
-    html_content = f.read()
+st.set_page_config(page_title="Sales by Product Type", layout="wide")
 
-# Render it in the app (v1 = version 1, not vl)
-st.components.v1.html(html_content, height=900, scrolling=True)
-else:
-    st.info("Please upload an Excel file to begin.")
+# Read the HTML file
+try:
+    with open("components.html", "r", encoding="utf-8") as f:
+        html_content = f.read()
+    st.components.v1.html(html_content, height=900, scrolling=True)
+except FileNotFoundError:
+    st.error("❌ components.html not found. Please place the HTML file in the same directory as this script.")
