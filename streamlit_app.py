@@ -249,3 +249,6 @@ try:
 
 except Exception as e:
     st.error(f"An unexpected error occurred:\n\n{e}\n\n{traceback.format_exc()}")
+
+except Exception as e:
+    st.error(f"An unexpected error occurred:\n\n{e}\n\n{traceback.format_exc()}")
