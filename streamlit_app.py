@@ -79,7 +79,7 @@ try:
         df_confirmed["Branch"] = branch_name
         return df_confirmed
 
-    # --- PDF Generation Engine ---
+    # --- PDF Generation Engine (Programmatic layout avoiding Kaleido entirely) ---
     def generate_pdf_report(branch_data_dict, total_df):
         buffer = io.BytesIO()
         doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
@@ -252,7 +252,7 @@ try:
                     st.dataframe(b_df[["FILE_NO", "Agency", "Product_Type", "NETMAINPRODUCT"]], width="stretch")
 
     else:
-        st.info("👋 Welcome! Please upload at least one valid Branch Excel data sheet via the sidebar layout to initialize the matrix framework panels.")
+        st.info("👋 Welcome! Please upload at least one valid Branch Excel data sheet via the sidebar layout to initialize the dashboard panels.")
 
 except Exception as e:
     st.error(f"🛑 Critical System Exception Triggered:\n\n{e}\n\n{traceback.format_exc()}")
