@@ -1,6 +1,8 @@
 import streamlit as st
 
+# Read the HTML file
 with open("sales_dashboard.html", "r", encoding="utf-8") as f:
     html_content = f.read()
 
+# Render it in the app
 st.components.v1.html(html_content, height=900, scrolling=True)
