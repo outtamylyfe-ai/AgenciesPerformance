@@ -88,7 +88,6 @@ try:
         # Custom Typography
         title_style = ParagraphStyle('DocTitle', parent=styles['Heading1'], fontSize=24, spaceAfter=15, textColor=colors.HexColor("#1f77b4"))
         h2_style = ParagraphStyle('SectionHeading', parent=styles['Heading2'], fontSize=16, spaceBefore=15, spaceAfter=10, textColor=colors.HexColor("#2ca02c"))
-        body_style = ParagraphStyle('ReportBody', parent=styles['Normal'], fontSize=10, spaceAfter=8)
 
         elements = [Paragraph("Executive Sales Summary Report", title_style), Spacer(1, 12)]
         
@@ -198,7 +197,7 @@ try:
             branch_summary = total_df.groupby("Branch")["NETMAINPRODUCT"].sum().reset_index()
             fig_br = px.bar(branch_summary, x="Branch", y="NETMAINPRODUCT", text=branch_summary["NETMAINPRODUCT"].apply(format_big_number),
                             title="Revenue Contributed by Location Branch", color="Branch")
-            st.plotly_chart(fig_br, use_container_width=True)
+            st.plotly_chart(fig_br, width="stretch")
 
             # Consolidated Product Mix & Agency Breakdown
             col_l, col_r = st.columns(2)
@@ -206,13 +205,13 @@ try:
                 st.subheader("Global Product Strategy Mix")
                 prod_sum = total_df.groupby("Product_Type")["NETMAINPRODUCT"].sum().reset_index()
                 fig_p = px.pie(prod_sum, names="Product_Type", values="NETMAINPRODUCT", hole=0.3, color="Product_Type", color_discrete_map=product_colours)
-                st.plotly_chart(fig_p, use_container_width=True)
+                st.plotly_chart(fig_p, width="stretch")
             
             with col_r:
                 st.subheader("Inter-Branch Agency Landscape")
                 ag_br_pivot = total_df.groupby(["Agency", "Branch"])["NETMAINPRODUCT"].sum().reset_index()
                 fig_ag_br = px.bar(ag_br_pivot, x="Agency", y="NETMAINPRODUCT", color="Branch", barmode="stack", title="Agency Contribution split by Branch Location")
-                st.plotly_chart(fig_ag_br, use_container_width=True)
+                st.plotly_chart(fig_ag_br, width="stretch")
 
         # ------------------------------------------------------------
         # DYNAMIC TABS 1+: INDIVIDUAL SEGMENTED BRANCH PANELS
@@ -239,18 +238,18 @@ try:
                 fig_agency = px.bar(agency_sales, x="Agency", y="NETMAINPRODUCT", text="Display", color="Agency",
                                     color_discrete_map=agency_colours, title=f"{b_name} - Revenue by Placement Channel")
                 fig_agency.update_traces(textposition="outside")
-                st.plotly_chart(fig_agency, use_container_width=True)
+                st.plotly_chart(fig_agency, width="stretch")
 
                 # Split Product View Grid
                 sub_l, sub_r = st.columns(2)
                 with sub_l:
                     st.subheader("Product Group Delivery Distribution")
                     fig_product = px.pie(product_sales, names="Product_Type", values="NETMAINPRODUCT", hole=0.3, color="Product_Type", color_discrete_map=product_colours)
-                    st.plotly_chart(fig_product, use_container_width=True)
+                    st.plotly_chart(fig_product, width="stretch")
                 
                 with sub_r:
                     st.subheader("Raw Local Datatable Extract")
-                    st.dataframe(b_df[["FILE_NO", "Agency", "Product_Type", "NETMAINPRODUCT"]], use_container_width=True)
+                    st.dataframe(b_df[["FILE_NO", "Agency", "Product_Type", "NETMAINPRODUCT"]], width="stretch")
 
     else:
         st.info("👋 Welcome! Please upload at least one valid Branch Excel data sheet via the sidebar layout to initialize the matrix framework panels.")
