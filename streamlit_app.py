@@ -18,10 +18,23 @@ try:
     agency_colours = {"FGY": "#808080", "ZB": "#800080", "APG": "#000080", "SLA": "#FF0000", "JFL": "#00FFFF"}
     product_colours = {"FSP": "#1f77b4", "Pedestal": "#ff7f0e", "Niche": "#2ca02c", "Others": "#d62728"}
 
-    def format_big_number(value):
-        if abs(value) >= 1e6: return f"{value/1e6:.2f}m"
-        elif abs(value) >= 1e3: return f"{value/1e3:.2f}k"
-        else: return f"{value:.2f}"
+    # Formats numbers to strings with commas and dollar signs for easy copy/pasting
+    def format_currency(value):
+        if pd.isna(value):
+            return "$0.00"
+        return f"${value:,.2f}"
+
+    def format_currency_df(df, numeric_cols):
+        df_display = df.copy()
+        for col in numeric_cols:
+            if col in df_display.columns:
+                df_display[col] = df_display[col].apply(format_currency)
+        return df_display
+
+    def format_pct(value):
+        if pd.isna(value):
+            return "0.00%"
+        return f"{value:,.2f}%"
 
     # --- Processing Engine ---
     def process_branch_file(uploaded_file, branch_name):
@@ -79,69 +92,120 @@ try:
         df_confirmed["Branch"] = branch_name
         return df_confirmed
 
-    # --- PDF Generation Engine (Programmatic layout avoiding Kaleido entirely) ---
+    # --- PDF Generation Engine ---
     def generate_pdf_report(branch_data_dict, total_df):
         buffer = io.BytesIO()
-        doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
+        doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=30, leftMargin=30, topMargin=40, bottomMargin=40)
         styles = getSampleStyleSheet()
         
-        # Custom Typography
-        title_style = ParagraphStyle('DocTitle', parent=styles['Heading1'], fontSize=24, spaceAfter=15, textColor=colors.HexColor("#1f77b4"))
-        h2_style = ParagraphStyle('SectionHeading', parent=styles['Heading2'], fontSize=16, spaceBefore=15, spaceAfter=10, textColor=colors.HexColor("#2ca02c"))
+        title_style = ParagraphStyle('DocTitle', parent=styles['Heading1'], fontSize=22, spaceAfter=12, textColor=colors.HexColor("#1f77b4"))
+        h2_style = ParagraphStyle('SectionHeading', parent=styles['Heading2'], fontSize=16, spaceBefore=18, spaceAfter=8, textColor=colors.HexColor("#1f77b4"))
+        h3_style = ParagraphStyle('SubSectionHeading', parent=styles['Heading3'], fontSize=12, spaceBefore=12, spaceAfter=6, textColor=colors.HexColor("#2ca02c"))
 
-        elements = [Paragraph("Executive Sales Summary Report", title_style), Spacer(1, 12)]
+        elements = [Paragraph("Consolidated Executive Sales & Product Mix Report", title_style), Spacer(1, 10)]
         
-        # Section 1: Consolidated Overview
-        elements.append(Paragraph("1. Consolidated Overview Across Active Branches", h2_style))
-        summary_data = [["Branch / Attribute", "Total Confirmed Sales", "Unique Agencies", "Data Records"]]
+        # -------------------------------------------------------------------------
+        # 1. BRANCH PERFORMANCE BREAKDOWN
+        # -------------------------------------------------------------------------
+        elements.append(Paragraph("1. Branch Performance & Product Mix Strategy", h2_style))
         
         for br_name, df_br in branch_data_dict.items():
-            if not df_br.empty:
-                summary_data.append([
-                    f"{br_name} Branch", 
-                    f"${df_br['NETMAINPRODUCT'].sum():,.2f}", 
-                    str(df_br['Agency'].nunique()), 
-                    str(len(df_br))
-                ])
-        summary_data.append([
-            "Total Consolidated", 
-            f"${total_df['NETMAINPRODUCT'].sum():,.2f}", 
-            str(total_df['Agency'].nunique()), 
-            str(len(total_df))
-        ])
-        
-        t_summary = Table(summary_data, hAlign='LEFT')
-        t_summary.setStyle(TableStyle([
-            ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#1f77b4")),
-            ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
-            ('ALIGN', (0,0), (-1,-1), 'LEFT'),
-            ('BOTTOMPADDING', (0,0), (-1,0), 6),
-            ('BACKGROUND', (0,-1), (-1,-1), colors.HexColor("#e6e6e6")),
-            ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
-            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-            ('FONTNAME', (0,-1), (-1,-1), 'Helvetica-Bold'),
-        ]))
-        elements.append(t_summary)
-        elements.append(Spacer(1, 15))
-
-        # Section 2: Detailed Performance Matrix by Agency
-        elements.append(Paragraph("2. Consolidated Performance Matrix by Agency", h2_style))
-        agency_perf = total_df.groupby("Agency")["NETMAINPRODUCT"].sum().reset_index().sort_values("NETMAINPRODUCT", ascending=False)
-        
-        perf_data = [["Agency Name", "Aggregated Financial Performance", "Share %"]]
-        total_sales_val = total_df['NETMAINPRODUCT'].sum()
-        for _, row in agency_perf.iterrows():
-            pct = (row['NETMAINPRODUCT'] / total_sales_val) * 100
-            perf_data.append([row['Agency'], f"${row['NETMAINPRODUCT']:,.2f}", f"{pct:.1f}%"])
+            elements.append(Paragraph(f"📍 {br_name} Branch Breakdown", h3_style))
             
-        t_perf = Table(perf_data, hAlign='LEFT')
-        t_perf.setStyle(TableStyle([
+            br_matrix = df_br.pivot_table(index="Agency", columns="Product_Type", values="NETMAINPRODUCT", aggfunc="sum", fill_value=0)
+            
+            for col in ["FSP", "Pedestal", "Niche", "Others"]:
+                if col not in br_matrix.columns:
+                    br_matrix[col] = 0.0
+            
+            br_matrix = br_matrix[["FSP", "Pedestal", "Niche", "Others"]].copy()
+            br_matrix["Total Sales"] = br_matrix.sum(axis=1)
+            br_matrix = br_matrix.sort_values("Total Sales", ascending=False)
+            
+            br_table_data = [["Agency", "FSP", "Pedestal", "Niche", "Others", "Total Contribution"]]
+            for idx, row in br_matrix.iterrows():
+                br_table_data.append([
+                    idx, 
+                    format_currency(row['FSP']), 
+                    format_currency(row['Pedestal']), 
+                    format_currency(row['Niche']), 
+                    format_currency(row['Others']), 
+                    format_currency(row['Total Sales'])
+                ])
+                
+            t_br = Table(br_table_data, hAlign='LEFT')
+            t_br.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#2ca02c")),
+                ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+                ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+                ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                ('PADDING', (0,0), (-1,-1), 5),
+            ]))
+            elements.append(t_br)
+            elements.append(Spacer(1, 10))
+
+        # -------------------------------------------------------------------------
+        # 2. OVERALL CORPORATE PERFORMANCE
+        # -------------------------------------------------------------------------
+        elements.append(Paragraph("2. Overall Corporate Performance", h2_style))
+        
+        # 2A: OVERALL BY AGENCY
+        elements.append(Paragraph("2a. Overall Performance by Agency (Cross-Branch Product Mix)", h3_style))
+        overall_matrix = total_df.pivot_table(index="Agency", columns="Product_Type", values="NETMAINPRODUCT", aggfunc="sum", fill_value=0)
+        
+        for col in ["FSP", "Pedestal", "Niche", "Others"]:
+            if col not in overall_matrix.columns:
+                overall_matrix[col] = 0.0
+        overall_matrix = overall_matrix[["FSP", "Pedestal", "Niche", "Others"]].copy()
+        overall_matrix["Total Contribution"] = overall_matrix.sum(axis=1)
+        overall_matrix = overall_matrix.sort_values("Total Contribution", ascending=False)
+        
+        agency_data = [["Agency", "FSP", "Pedestal", "Niche", "Others", "Total Contribution"]]
+        for idx, row in overall_matrix.iterrows():
+            agency_data.append([
+                idx, 
+                format_currency(row['FSP']), 
+                format_currency(row['Pedestal']), 
+                format_currency(row['Niche']), 
+                format_currency(row['Others']), 
+                format_currency(row['Total Contribution'])
+            ])
+            
+        t_agency = Table(agency_data, hAlign='LEFT')
+        t_agency.setStyle(TableStyle([
             ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#7f7f7f")),
             ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
             ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
             ('PADDING', (0,0), (-1,-1), 5),
         ]))
-        elements.append(t_perf)
+        elements.append(t_agency)
+        elements.append(Spacer(1, 10))
+
+        # 2B: OVERALL BY PRODUCT MIX
+        elements.append(Paragraph("2b. Overall Performance by Product Strategy", h3_style))
+        overall_product = total_df.groupby("Product_Type")["NETMAINPRODUCT"].sum().reset_index()
+        overall_product = overall_product.sort_values("NETMAINPRODUCT", ascending=False)
+        total_revenue = overall_product["NETMAINPRODUCT"].sum()
+        
+        prod_data = [["Product Category", "Total Sales", "Portfolio Share %"]]
+        for _, row in overall_product.iterrows():
+            share = (row['NETMAINPRODUCT'] / total_revenue) * 100
+            prod_data.append([
+                row['Product_Type'], 
+                format_currency(row['NETMAINPRODUCT']), 
+                format_pct(share)
+            ])
+            
+        t_prod = Table(prod_data, hAlign='LEFT')
+        t_prod.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#1f77b4")),
+            ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('PADDING', (0,0), (-1,-1), 5),
+        ]))
+        elements.append(t_prod)
 
         doc.build(elements)
         buffer.seek(0)
@@ -158,24 +222,20 @@ try:
     if lst_file: branch_dfs["LST"] = process_branch_file(lst_file, "LST")
     if tlt_file: branch_dfs["TLT"] = process_branch_file(tlt_file, "TLT")
 
-    # Clean out unparseable or completely empty sheets
     active_branches = {k: v for k, v in branch_dfs.items() if v is not None and not v.empty}
 
     if active_branches:
-        # Build master unified dataframe
         total_df = pd.concat(active_branches.values(), ignore_index=True)
         
-        # Create Dynamic UI Tabs based on which inputs are present
         tab_titles = ["Consolidated Overview"] + [f"{name} Branch" for name in active_branches.keys()]
         tabs = st.tabs(tab_titles)
 
         # ------------------------------------------------------------
-        # TAB 0: CONSOLIDATED METRICS & GENERATE EXPORTS
+        # TAB 0: CONSOLIDATED OVERVIEW
         # ------------------------------------------------------------
         with tabs[0]:
             st.header("🏢 Unified Corporate Overview")
             
-            # Action and PDF Download Bar
             pdf_buffer = generate_pdf_report(active_branches, total_df)
             st.download_button(
                 label="📥 Download Consolidated Executive Report (PDF)",
@@ -186,32 +246,54 @@ try:
             )
             st.write("---")
 
-            # High level metrics
+            # High Level Metrics
             c1, c2, c3 = st.columns(3)
-            c1.metric("Total Combined Sales", f"${total_df['NETMAINPRODUCT'].sum():,.2f}")
+            c1.metric("Total Combined Sales", format_currency(total_df['NETMAINPRODUCT'].sum()))
             c2.metric("Active Operating Branches", len(active_branches))
-            c3.metric("Total Confirmed Transactions", len(total_df))
+            c3.metric("Total Confirmed Transactions", f"{len(total_df):,}")
 
-            # Cross Branch Comparative Performance Charts
-            st.subheader("Branch vs Branch Performance Breakdown")
-            branch_summary = total_df.groupby("Branch")["NETMAINPRODUCT"].sum().reset_index()
-            fig_br = px.bar(branch_summary, x="Branch", y="NETMAINPRODUCT", text=branch_summary["NETMAINPRODUCT"].apply(format_big_number),
-                            title="Revenue Contributed by Location Branch", color="Branch")
-            st.plotly_chart(fig_br, width="stretch")
-
-            # Consolidated Product Mix & Agency Breakdown
-            col_l, col_r = st.columns(2)
-            with col_l:
-                st.subheader("Global Product Strategy Mix")
-                prod_sum = total_df.groupby("Product_Type")["NETMAINPRODUCT"].sum().reset_index()
-                fig_p = px.pie(prod_sum, names="Product_Type", values="NETMAINPRODUCT", hole=0.3, color="Product_Type", color_discrete_map=product_colours)
-                st.plotly_chart(fig_p, width="stretch")
+            st.write("---")
             
-            with col_r:
-                st.subheader("Inter-Branch Agency Landscape")
-                ag_br_pivot = total_df.groupby(["Agency", "Branch"])["NETMAINPRODUCT"].sum().reset_index()
-                fig_ag_br = px.bar(ag_br_pivot, x="Agency", y="NETMAINPRODUCT", color="Branch", barmode="stack", title="Agency Contribution split by Branch Location")
-                st.plotly_chart(fig_ag_br, width="stretch")
+            # --- OVERALL PERFORMANCE BY AGENCY ---
+            st.subheader("Overall Performance by Agency")
+            global_agency_prod = total_df.groupby(["Agency", "Product_Type"])["NETMAINPRODUCT"].sum().reset_index()
+            
+            fig_gap = px.bar(global_agency_prod, x="Agency", y="NETMAINPRODUCT", color="Product_Type",
+                             title="Consolidated Product Breakdown Across All Agencies", 
+                             color_discrete_map=product_colours, barmode="stack", 
+                             text=global_agency_prod["NETMAINPRODUCT"].apply(format_currency))
+            st.plotly_chart(fig_gap, width="stretch")
+            
+            global_pivot = total_df.pivot_table(index="Agency", columns="Product_Type", values="NETMAINPRODUCT", aggfunc="sum", fill_value=0)
+            for p_col in ["FSP", "Pedestal", "Niche", "Others"]:
+                if p_col not in global_pivot.columns:
+                    global_pivot[p_col] = 0.0
+            global_pivot = global_pivot[["FSP", "Pedestal", "Niche", "Others"]]
+            global_pivot["Total Contribution ($)"] = global_pivot.sum(axis=1)
+            
+            st.markdown("**Data Table: Overall Agency Product Mix Matrix**")
+            display_global_pivot = format_currency_df(global_pivot.sort_values("Total Contribution ($)", ascending=False), ["FSP", "Pedestal", "Niche", "Others", "Total Contribution ($)"])
+            st.dataframe(display_global_pivot, width="stretch")
+
+            st.write("---")
+
+            # --- OVERALL PERFORMANCE BY PRODUCT MIX ---
+            st.subheader("Overall Performance by Product Mix")
+            prod_sum = total_df.groupby("Product_Type")["NETMAINPRODUCT"].sum().reset_index()
+            prod_sum["Total Sales"] = prod_sum["NETMAINPRODUCT"]
+            
+            fig_p = px.pie(prod_sum, names="Product_Type", values="Total Sales", hole=0.3, 
+                           title="Global Product Portfolio Split", color="Product_Type", color_discrete_map=product_colours)
+            st.plotly_chart(fig_p, width="stretch")
+            
+            st.markdown("**Data Table: Overall Portfolio Contribution**")
+            prod_table = prod_sum[["Product_Type", "Total Sales"]].sort_values("Total Sales", ascending=False)
+            prod_table["Portfolio Share %"] = (prod_table["Total Sales"] / prod_table["Total Sales"].sum()) * 100
+            
+            display_prod_table = format_currency_df(prod_table, ["Total Sales"])
+            display_prod_table["Portfolio Share %"] = display_prod_table["Portfolio Share %"].apply(format_pct)
+            st.dataframe(display_prod_table, width="stretch", hide_index=True)
+
 
         # ------------------------------------------------------------
         # DYNAMIC TABS 1+: INDIVIDUAL SEGMENTED BRANCH PANELS
@@ -221,35 +303,45 @@ try:
                 st.header(f"📍 Operational Analysis: {b_name} Branch")
                 
                 b_total = b_df["NETMAINPRODUCT"].sum()
-                agency_sales = b_df.groupby("Agency")["NETMAINPRODUCT"].sum().reset_index()
-                agency_sales["Display"] = agency_sales["NETMAINPRODUCT"].apply(format_big_number)
                 
-                product_sales = b_df.groupby("Product_Type")["NETMAINPRODUCT"].sum().reset_index()
-                product_sales["Display"] = product_sales["NETMAINPRODUCT"].apply(format_big_number)
-
-                # Segmented Metrics
                 mc1, mc2, mc3 = st.columns(3)
-                mc1.metric(f"{b_name} Total Revenue", f"${b_total:,.2f}")
-                mc2.metric("Active Local Agencies", len(agency_sales))
-                mc3.metric("Volume of Line Orders", len(b_df))
+                mc1.metric(f"{b_name} Total Revenue", format_currency(b_total))
+                mc2.metric("Active Local Agencies", b_df["Agency"].nunique())
+                mc3.metric("Volume of Line Orders", f"{len(b_df):,}")
 
-                # Segmented Bar Chart
-                st.subheader("Agency Performance Breakdown")
-                fig_agency = px.bar(agency_sales, x="Agency", y="NETMAINPRODUCT", text="Display", color="Agency",
-                                    color_discrete_map=agency_colours, title=f"{b_name} - Revenue by Placement Channel")
-                fig_agency.update_traces(textposition="outside")
-                st.plotly_chart(fig_agency, width="stretch")
-
-                # Split Product View Grid
-                sub_l, sub_r = st.columns(2)
-                with sub_l:
-                    st.subheader("Product Group Delivery Distribution")
-                    fig_product = px.pie(product_sales, names="Product_Type", values="NETMAINPRODUCT", hole=0.3, color="Product_Type", color_discrete_map=product_colours)
-                    st.plotly_chart(fig_product, width="stretch")
+                # Interactive Stacked Bar Chart
+                st.subheader(f"Agency Performance & Product Mix in {b_name}")
+                branch_agency_prod = b_df.groupby(["Agency", "Product_Type"])["NETMAINPRODUCT"].sum().reset_index()
                 
-                with sub_r:
-                    st.subheader("Raw Local Datatable Extract")
-                    st.dataframe(b_df[["FILE_NO", "Agency", "Product_Type", "NETMAINPRODUCT"]], width="stretch")
+                fig_br_ap = px.bar(branch_agency_prod, x="Agency", y="NETMAINPRODUCT", color="Product_Type",
+                                  title=f"{b_name} Branch - Revenue by Placement Channel",
+                                  color_discrete_map=product_colours, barmode="stack",
+                                  text=branch_agency_prod["NETMAINPRODUCT"].apply(format_currency))
+                st.plotly_chart(fig_br_ap, width="stretch")
+
+                # Copy/Paste Ready Formatted Data Table
+                st.markdown(f"**Data Table: {b_name} Agency Performance Matrix**")
+                branch_pivot = b_df.pivot_table(index="Agency", columns="Product_Type", values="NETMAINPRODUCT", aggfunc="sum", fill_value=0)
+                
+                for p_col in ["FSP", "Pedestal", "Niche", "Others"]:
+                    if p_col not in branch_pivot.columns:
+                        branch_pivot[p_col] = 0.0
+                        
+                branch_pivot = branch_pivot[["FSP", "Pedestal", "Niche", "Others"]]
+                branch_pivot["Total Sales ($)"] = branch_pivot.sum(axis=1)
+                branch_pivot["Branch Contribution %"] = (branch_pivot["Total Sales ($)"] / b_total) * 100
+                branch_pivot = branch_pivot.sort_values("Total Sales ($)", ascending=False)
+                
+                display_branch_pivot = format_currency_df(branch_pivot, ["FSP", "Pedestal", "Niche", "Others", "Total Sales ($)"])
+                display_branch_pivot["Branch Contribution %"] = display_branch_pivot["Branch Contribution %"].apply(format_pct)
+                
+                st.dataframe(display_branch_pivot, width="stretch")
+                
+                st.write("---")
+                st.markdown("**Raw Local Datatable Extract**")
+                display_raw = b_df[["FILE_NO", "Agency", "Product_Type", "NETMAINPRODUCT"]].copy()
+                display_raw = format_currency_df(display_raw, ["NETMAINPRODUCT"])
+                st.dataframe(display_raw, width="stretch", hide_index=True)
 
     else:
         st.info("👋 Welcome! Please upload at least one valid Branch Excel data sheet via the sidebar layout to initialize the dashboard panels.")
