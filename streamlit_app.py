@@ -278,12 +278,18 @@ try:
     active_branches = {k: v for k, v in branch_dfs.items() if v is not None and not v.empty}
 
     if active_branches:
+        # 1. Compile primary sales register
         total_df = pd.concat(active_branches.values(), ignore_index=True)
         
+        # 2. Reconcile cancellations with text-normalized key structure
         cxl_count = 0
         if cxl_file:
             df_cxl = process_cancellation_file(cxl_file)
             if df_cxl is not None and not df_cxl.empty:
+                # Force standard text types on matching elements to avoid data type breakdown
+                total_df["FILE_NO"] = total_df["FILE_NO"].astype(str).str.strip()
+                df_cxl["FILE_NO"] = df_cxl["FILE_NO"].astype(str).str.strip()
+                
                 total_df = total_df.merge(
                     df_cxl, 
                     left_on=["FILE_NO", "Branch"], 
@@ -295,6 +301,7 @@ try:
                 cxl_count = cxl_mask.sum()
                 total_df = total_df[~cxl_mask].drop(columns=["BRANCH", "_merge"])
                 
+                # Rebuild sub-dictionaries to match cleansed records
                 for name in list(active_branches.keys()):
                     active_branches[name] = total_df[total_df["Branch"] == name].copy()
                     if active_branches[name].empty:
