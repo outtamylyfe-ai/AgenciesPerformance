@@ -1,7 +1,10 @@
-# --- CRITICAL FIX FOR PYTHON 3.14+ SEGMENTATION FAULTS ---
+# =========================================================================
+# 🛑 CRITICAL PATCH FOR PYTHON 3.14+ SEGMENTATION FAULTS
+# This MUST execute at line 1 before ANY other package attempts imports.
+# =========================================================================
 import sys
-sys.modules['_rl_accel'] = None  # Forces ReportLab to safely use its pure-Python fallback engine
-# ---------------------------------------------------------
+sys.modules['_rl_accel'] = None  
+# =========================================================================
 
 import streamlit as st
 import pandas as pd
@@ -107,7 +110,6 @@ try:
 
         df_confirmed["Product_Type"] = df_confirmed["PRODUCT_CODE"].apply(get_product_type)
         df_confirmed["Branch"] = branch_name
-        # Keep FILE_NO explicitly clean for down-funnel hash matching
         if "FILE_NO" in df_confirmed.columns:
             df_confirmed["FILE_NO"] = df_confirmed["FILE_NO"].astype(str).str.strip()
         return df_confirmed
@@ -276,16 +278,12 @@ try:
     active_branches = {k: v for k, v in branch_dfs.items() if v is not None and not v.empty}
 
     if active_branches:
-        # 1. First build out unified raw sales book
         total_df = pd.concat(active_branches.values(), ignore_index=True)
-        initial_count = len(total_df)
         
-        # 2. Reconcile and purge entries matching cancellation keys if file uploaded
         cxl_count = 0
         if cxl_file:
             df_cxl = process_cancellation_file(cxl_file)
             if df_cxl is not None and not df_cxl.empty:
-                # Merge indicators to trace identical unique keys across identical branches
                 total_df = total_df.merge(
                     df_cxl, 
                     left_on=["FILE_NO", "Branch"], 
@@ -293,12 +291,10 @@ try:
                     how="left", 
                     indicator=True
                 )
-                # Drop rows where a matching cancellation was discovered
                 cxl_mask = total_df["_merge"] == "both"
                 cxl_count = cxl_mask.sum()
                 total_df = total_df[~cxl_mask].drop(columns=["BRANCH", "_merge"])
                 
-                # Recalibrate active_branches dictionaries to accurately isolate records per tab
                 for name in list(active_branches.keys()):
                     active_branches[name] = total_df[total_df["Branch"] == name].copy()
                     if active_branches[name].empty:
